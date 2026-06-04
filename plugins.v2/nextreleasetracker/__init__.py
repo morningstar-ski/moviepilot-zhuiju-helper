@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.11"
+    plugin_version = "1.1.12"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -306,7 +306,7 @@ class NextReleaseTracker(_PluginBase):
                     ),
                     self._form_selection_editor(
                         title="剧集追更名单",
-                        subtitle="在这里添加你想继续追的剧。加入后，插件会自动帮你关注后面的新一季。可以直接搜剧名后加入，不需要自己查复杂编号。",
+                        subtitle="在这里添加你想继续追的剧。加入后，插件会优先用本地入库记录和订阅记录判断你已经追到哪一季；如果现在已经到第二季，后面只会留意第三季，不会回头提示第一季。可以直接搜剧名后加入，不需要自己查复杂编号。",
                         media_label="剧集",
                         model_key="tracked_tv_ids",
                         add_model="tv_candidate_id",
@@ -317,7 +317,7 @@ class NextReleaseTracker(_PluginBase):
                         saved_summary=self._selection_snapshot_alert("剧集", self._selected_tv_ids, tv_tracks, False),
                         candidates=tv_candidates,
                         hidden_candidate_count=hidden_tv_candidates,
-                        candidate_note="加入后，插件会继续关注这部剧后面的新一季。特别篇、番外、重启版这类内容，一般不会算成同一部剧的下一季。",
+                        candidate_note="加入后，插件会继续关注这部剧后面的新一季，不会回头把更早的旧季再提示一遍；但“已追到哪一季”只会参考本地入库和订阅记录，不会单靠 TMDB 猜。特别篇、番外、重启版这类内容，一般不会算成同一部剧的下一季。",
                         show_expr="{{ enable_tv }}",
                     ),
                     self._form_selection_editor(
@@ -2079,7 +2079,7 @@ class NextReleaseTracker(_PluginBase):
                 if str(tmdb_id) in existing_tv_tracks:
                     continue
                 candidate = tv_lookup.get(int(tmdb_id))
-                season = coerce_int((candidate or {}).get("latest_season"), 0) or 0
+                season = coerce_int((candidate or {}).get("baseline_season"), 0) or 0
                 if season <= 0:
                     continue
                 store.acknowledge_tv_completion(
@@ -2412,7 +2412,7 @@ class NextReleaseTracker(_PluginBase):
                         f"{track.get('title') or f'编号 {tmdb_id}'}（当前到 {season_text}{pending_text}）"
                     )
                 else:
-                    preview_lines.append(f"编号 {tmdb_id}（已加入，等待第一次命中）")
+                    preview_lines.append(f"编号 {tmdb_id}（已加入，等待确认已追到哪一季）")
 
         if not selected_ids:
             text = f"当前还没加入任何{media_label}。把想追的内容加到这里后，插件才会开始帮你留意更新。"
@@ -2527,7 +2527,7 @@ class NextReleaseTracker(_PluginBase):
             progress = (
                 f"当前到 {latest_text} / 待留意 {self._join_values(track.get('pending_seasons'))}"
                 if track
-                else "等待第一次记录"
+                else "等待确认已追到哪一季"
             )
             rows.append(
                 [
@@ -2811,6 +2811,7 @@ class NextReleaseTracker(_PluginBase):
                 last_seen_at=self._as_str(getattr(history, "date", None)),
                 source_label="最近入库",
                 latest_season=parse_season_token(getattr(history, "seasons", None)) if media_type == MediaType.TV.value else None,
+                baseline_season=parse_season_token(getattr(history, "seasons", None)) if media_type == MediaType.TV.value else None,
             )
 
         for subscription in subscriptions:
@@ -2827,6 +2828,7 @@ class NextReleaseTracker(_PluginBase):
                 or self._as_str(getattr(subscription, "date", None)),
                 source_label="最近订阅",
                 latest_season=coerce_int(getattr(subscription, "season", None)) if media_type == MediaType.TV.value else None,
+                baseline_season=coerce_int(getattr(subscription, "season", None)) if media_type == MediaType.TV.value else None,
             )
 
         for candidate in self._tmdb_discover_candidates(MediaType.TV.value):
@@ -2896,6 +2898,7 @@ class NextReleaseTracker(_PluginBase):
         last_seen_at: Optional[str],
         source_label: str,
         latest_season: Optional[int] = None,
+        baseline_season: Optional[int] = None,
     ) -> None:
         entry = lookup.get(int(tmdb_id)) or {
             "tmdb_id": int(tmdb_id),
@@ -2903,6 +2906,7 @@ class NextReleaseTracker(_PluginBase):
             "year": year,
             "last_seen_at": last_seen_at,
             "latest_season": latest_season,
+            "baseline_season": baseline_season,
             "sources": [],
         }
         if title and (not entry.get("title") or str(entry.get("title", "")).startswith("TMDB-")):
@@ -2921,6 +2925,11 @@ class NextReleaseTracker(_PluginBase):
             entry["latest_season"] = max(
                 coerce_int(entry.get("latest_season"), 0) or 0,
                 coerce_int(latest_season, 0) or 0,
+            ) or None
+        if baseline_season is not None:
+            entry["baseline_season"] = max(
+                coerce_int(entry.get("baseline_season"), 0) or 0,
+                coerce_int(baseline_season, 0) or 0,
             ) or None
         if source_label not in entry["sources"]:
             entry["sources"].append(source_label)
@@ -2959,11 +2968,18 @@ class NextReleaseTracker(_PluginBase):
         for row_index, candidate in enumerate(candidates):
             tmdb_id = coerce_int(candidate.get("tmdb_id"), 0) or 0
             latest_season = coerce_int(candidate.get("latest_season"), 0) or 0
-            clue_text = (
-                f"目前到 S{latest_season:02d}"
-                if is_tv and latest_season
-                else ("已找到系列线索" if not is_tv else "等待第一次命中")
-            )
+            baseline_season = coerce_int(candidate.get("baseline_season"), 0) or 0
+            if is_tv:
+                if baseline_season and latest_season > baseline_season:
+                    clue_text = f"本地到 S{baseline_season:02d} / 已发现到 S{latest_season:02d}"
+                elif baseline_season:
+                    clue_text = f"本地到 S{baseline_season:02d}"
+                elif latest_season:
+                    clue_text = f"已发现到 S{latest_season:02d} / 待确认起点"
+                else:
+                    clue_text = "待确认起点"
+            else:
+                clue_text = "已找到系列线索"
             body_rows.append(
                 {
                     "component": "tr",

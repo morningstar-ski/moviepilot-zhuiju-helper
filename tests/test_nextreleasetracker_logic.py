@@ -580,6 +580,8 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("剧集追更名单", form_text)
         self.assertIn("手动加入剧集名单", form_text)
         self.assertIn("直接搜剧名后加入", form_text)
+        self.assertIn("只会留意第三季，不会回头提示第一季", form_text)
+        self.assertIn("不会单靠 TMDB 猜", form_text)
         self.assertIn("清空白名单", form_text)
         self.assertIn("电影追更名单", form_text)
         self.assertIn("插件会继续关注这部剧后面的新一季", form_text)
@@ -655,6 +657,8 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual([1396, 60625], [item["tmdb_id"] for item in tv_candidates])
         self.assertEqual(5, tv_candidates[0]["latest_season"])
         self.assertEqual(2, tv_candidates[1]["latest_season"])
+        self.assertEqual(5, tv_candidates[0]["baseline_season"])
+        self.assertEqual(2, tv_candidates[1]["baseline_season"])
         self.assertEqual(["最近订阅"], tv_candidates[0]["sources"])
         self.assertEqual(["最近入库"], movie_candidates[0]["sources"])
 
@@ -738,6 +742,38 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual(550, movie_track["anchor_tmdb_id"])
         self.assertEqual(999, movie_track["collection_id"])
         self.assertEqual("collection:999", movie_track["track_key"])
+
+    def test_selected_tv_without_local_baseline_does_not_guess_from_tmdb_discover(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin_module.TransferHistoryOper = lambda: types.SimpleNamespace(list_by_date=lambda _cutoff: [])
+        plugin_module.SubscribeOper = lambda: types.SimpleNamespace(list=lambda state=None: [])
+        plugin._tmdb_discover_candidates = lambda media_type: (
+            [
+                types.SimpleNamespace(
+                    tmdb_id=60625,
+                    title="Rick and Morty",
+                    year="2013",
+                    release_date="2026-06-03",
+                    number_of_seasons=9,
+                )
+            ]
+            if media_type == plugin_module.MediaType.TV.value
+            else []
+        )
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "60625",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        self.assertEqual([60625], store.get_selected_tv_ids())
+        self.assertEqual({}, store.get_tv_tracks())
 
     def test_manual_movie_mapping_can_be_edited_from_config_and_syncs_back(self):
         plugin_module = load_plugin_module()
