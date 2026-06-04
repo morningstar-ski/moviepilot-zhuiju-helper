@@ -1,0 +1,26 @@
+{
+  "NextReleaseTracker": {
+    "name": "追剧助手",
+    "description": "Track only user-selected TV shows and movies, notify once when the next season or sequel appears, then finish tracking.",
+    "labels": "notification,tmdb,tracking,watchlist",
+    "version": "1.1.7",
+    "icon": "nextreleasetracker.png",
+    "author": "Codex",
+    "level": 1,
+    "release": true,
+    "system_version": ">=2.12.0",
+    "history": {
+      "v1.1.7": "Renamed the plugin's user-facing display name to 追剧助手 while keeping the stable plugin ID for compatibility.",
+      "v1.1.6": "Clarified advanced manual movie mapping examples with real TMDB movie IDs and explicit movie-name references, so users can understand which numbers to fill in.",
+      "v1.1.5": "Fixed audited backend gaps: invalid cron now falls back safely, notify-off scans keep unresolved releases pending instead of silently dropping them, and collection-based movie removals also clear manual mappings.",
+      "v1.1.4": "Added a real config-page editor for advanced movie manual mappings, and kept that mapping text in sync with runtime changes.",
+      "v1.1.3": "Refined config and status-page copy into simpler user-facing language, while keeping advanced manual ID and mapping controls available.",
+      "v1.1.2": "Added time-sorted TV and movie candidate lists with title filtering and one-click whitelist selection, plus bootstrap seeding from local history for selected entries.",
+      "v1.1.1": "Reworked the config and status UI around explicit whitelist selection, with visible selected lists, clearer tracking state, and direct remove actions.",
+      "v1.1.0": "Switched to explicit watchlists: subscriptions are no longer tracked by default, scans notify once when a new season or sequel appears, and the track is then closed.",
+      "v1.0.2": "Added safe runtime event diagnostics for TV completion handlers, with automatic cleanup and status-page visibility.",
+      "v1.0.1": "TV-only default mode, refined plugin form and status page with action buttons, richer runtime visibility, and host delivery hardening.",
+      "v1.0.0": "Initial delivery with TV next-season tracking, TMDB collection movie sequel tracking, manual management APIs, transfer-history backfill, and status page."
+    }
+  }
+}
