@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.10"
+    plugin_version = "1.1.11"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -57,6 +57,7 @@ class NextReleaseTracker(_PluginBase):
     diagnostic_tv_tmdb_id = 9900001
     diagnostic_tv_title = "NRT Diagnostic Series"
     FORM_CANDIDATE_LIMIT = 120
+    FORM_CANDIDATE_PAGE_SIZE = 24
     DEFAULT_CRON = "0 3 * * 1"
     MAX_TMDB_CALLS_PER_MINUTE_CAP = 5
     SCAN_TICK_CRON = "* * * * *"
@@ -278,6 +279,31 @@ class NextReleaseTracker(_PluginBase):
                             },
                         ],
                     ),
+                    self._form_section_card(
+                        title="候选检索",
+                        subtitle="下面的剧集和电影候选会继续分开显示，但搜索框是统一的；输入片名、年份或 TMDB 编号后，会同时过滤两边的候选列表。",
+                        content=[
+                            {
+                                "component": "VTextField",
+                                "props": {
+                                    "model": "candidate_search_text",
+                                    "label": "统一搜索候选剧集/电影",
+                                    "placeholder": "例如：Rick、黑客帝国、2013、603",
+                                    "clearable": True,
+                                    "prepend-inner-icon": "mdi-magnify",
+                                    "hide-details": "auto",
+                                },
+                            },
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "variant": "tonal",
+                                    "text": f"候选列表默认每组每页显示 {self.FORM_CANDIDATE_PAGE_SIZE} 条，避免一屏拉太长；需要时再翻页。",
+                                },
+                            },
+                        ],
+                    ),
                     self._form_selection_editor(
                         title="剧集追更名单",
                         subtitle="在这里添加你想继续追的剧。加入后，插件会自动帮你关注后面的新一季。可以直接搜剧名后加入，不需要自己查复杂编号。",
@@ -285,7 +311,8 @@ class NextReleaseTracker(_PluginBase):
                         model_key="tracked_tv_ids",
                         add_model="tv_candidate_id",
                         remove_model="tv_remove_id",
-                        search_model="tv_search_text",
+                        search_model="candidate_search_text",
+                        page_model="tv_candidate_page",
                         placeholder="60625",
                         saved_summary=self._selection_snapshot_alert("剧集", self._selected_tv_ids, tv_tracks, False),
                         candidates=tv_candidates,
@@ -300,7 +327,8 @@ class NextReleaseTracker(_PluginBase):
                         model_key="tracked_movie_ids",
                         add_model="movie_candidate_id",
                         remove_model="movie_remove_id",
-                        search_model="movie_search_text",
+                        search_model="candidate_search_text",
+                        page_model="movie_candidate_page",
                         placeholder="550",
                         saved_summary=self._selection_snapshot_alert("电影", self._selected_movie_ids, movie_tracks, True),
                         candidates=movie_candidates,
@@ -383,10 +411,11 @@ class NextReleaseTracker(_PluginBase):
             "tracked_tv_ids": "",
             "tracked_movie_ids": "",
             "manual_movie_mappings": "",
-            "tv_search_text": "",
+            "candidate_search_text": "",
+            "tv_candidate_page": 1,
+            "movie_candidate_page": 1,
             "tv_candidate_id": "",
             "tv_remove_id": "",
-            "movie_search_text": "",
             "movie_candidate_id": "",
             "movie_remove_id": "",
         }
@@ -2206,6 +2235,7 @@ class NextReleaseTracker(_PluginBase):
         add_model: str,
         remove_model: str,
         search_model: str,
+        page_model: str,
         placeholder: str,
         saved_summary: dict,
         candidates: List[Dict[str, Any]],
@@ -2219,7 +2249,7 @@ class NextReleaseTracker(_PluginBase):
                 "props": {
                     "type": "info",
                     "variant": "tonal",
-                    "text": f"下表按最近时间排序。你可以在表头搜片名、年份或编号，快速找到想加的{media_label}。",
+                    "text": f"下表按最近时间排序，并和上面的统一搜索框联动。{media_label}候选默认分页显示，避免一口气铺太长。",
                 },
             },
             {
@@ -2234,6 +2264,7 @@ class NextReleaseTracker(_PluginBase):
                 media_label=media_label,
                 model_key=model_key,
                 search_model=search_model,
+                page_model=page_model,
                 candidates=candidates,
             ),
         ]
@@ -2244,7 +2275,10 @@ class NextReleaseTracker(_PluginBase):
                     "props": {
                         "type": "info",
                         "variant": "tonal",
-                        "text": f"当前先显示最近 {len(candidates)} 项；如果你要找的内容不在这里，也可以直接手动补编号。",
+                        "text": (
+                            f"当前候选池先保留最近 {len(candidates)} 项；每页显示 {self.FORM_CANDIDATE_PAGE_SIZE} 项。"
+                            "如果你要找的内容不在这里，也可以直接手动补编号。"
+                        ),
                     },
                 }
             )
@@ -2907,6 +2941,7 @@ class NextReleaseTracker(_PluginBase):
         media_label: str,
         model_key: str,
         search_model: str,
+        page_model: str,
         candidates: List[Dict[str, Any]],
     ) -> dict:
         headers = ["片名", "年份", "TMDB", "最近时间", "来源", "线索", "操作"]
@@ -2918,33 +2953,10 @@ class NextReleaseTracker(_PluginBase):
             }
 
         is_tv = media_label == "剧集"
-        search_label = "搜剧名或年份" if is_tv else "搜电影名或年份"
-        search_row = {
-            "component": "tr",
-            "content": [
-                {
-                    "component": "th",
-                    "props": {"class": "text-start py-2", "colspan": len(headers)},
-                    "content": [
-                        {
-                            "component": "VTextField",
-                            "props": {
-                                "model": search_model,
-                                "label": search_label,
-                                "placeholder": "找到后直接点下方“加入白名单”",
-                                "clearable": True,
-                                "prepend-inner-icon": "mdi-magnify",
-                                "hide-details": "auto",
-                                "density": "comfortable",
-                            },
-                        }
-                    ],
-                }
-            ],
-        }
+        search_texts = [str(candidate.get("search_text") or "") for candidate in candidates]
 
         body_rows = []
-        for candidate in candidates:
+        for row_index, candidate in enumerate(candidates):
             tmdb_id = coerce_int(candidate.get("tmdb_id"), 0) or 0
             latest_season = coerce_int(candidate.get("latest_season"), 0) or 0
             clue_text = (
@@ -2955,7 +2967,14 @@ class NextReleaseTracker(_PluginBase):
             body_rows.append(
                 {
                     "component": "tr",
-                    "props": {"show": self._candidate_row_show_expr(search_model, str(candidate.get("search_text") or ""))},
+                    "props": {
+                        "show": self._candidate_row_show_expr(
+                            search_model,
+                            page_model,
+                            search_texts,
+                            row_index,
+                        )
+                    },
                     "content": [
                         self._table_cell(candidate.get("title") or f"TMDB-{tmdb_id}"),
                         self._table_cell(candidate.get("year") or "-"),
@@ -2982,34 +3001,136 @@ class NextReleaseTracker(_PluginBase):
             )
 
         return {
-            "component": "VTable",
-            "props": {"hover": True, "density": "compact"},
+            "component": "div",
             "content": [
                 {
-                    "component": "thead",
+                    "component": "VTable",
+                    "props": {"hover": True, "density": "compact"},
                     "content": [
                         {
-                            "component": "tr",
+                            "component": "thead",
                             "content": [
-                                {"component": "th", "props": {"class": "text-start"}, "text": header}
-                                for header in headers
+                                {
+                                    "component": "tr",
+                                    "content": [
+                                        {"component": "th", "props": {"class": "text-start"}, "text": header}
+                                        for header in headers
+                                    ],
+                                }
                             ],
                         },
-                        search_row,
+                        {"component": "tbody", "content": body_rows},
                     ],
                 },
-                {"component": "tbody", "content": body_rows},
+                {
+                    "component": "div",
+                    "props": {
+                        "class": "d-flex flex-column flex-md-row align-start align-md-center justify-space-between ga-3 mt-3"
+                    },
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "text-caption text-medium-emphasis"},
+                            "text": self._candidate_page_summary_expr(search_model, page_model, search_texts, media_label),
+                        },
+                        {
+                            "component": "div",
+                            "props": {"show": self._candidate_pagination_needed_expr(search_model, search_texts)},
+                            "content": [
+                                {
+                                    "component": "VPagination",
+                                    "props": {
+                                        "model": page_model,
+                                        "length": self._candidate_page_length_expr(search_model, search_texts),
+                                        "total-visible": 5,
+                                        "density": "comfortable",
+                                    },
+                                }
+                            ],
+                        },
+                    ],
+                },
             ],
         }
 
     @classmethod
-    def _candidate_row_show_expr(cls, search_model: str, search_text: str) -> str:
-        candidate_text = cls._js_value(str(search_text or "").lower())
+    def _candidate_filtered_indexes_expr(cls, search_model: str, search_texts: List[str]) -> str:
+        candidate_texts = cls._js_value([str(search_text or "").lower() for search_text in search_texts])
+        return (
+            "(() => { "
+            f"const rows = {candidate_texts}; "
+            f"const query = String(model.{search_model} || '').trim().toLowerCase(); "
+            "const matched = []; "
+            "rows.forEach((haystack, index) => { "
+            "if (!query || String(haystack || '').includes(query)) { matched.push(index); } "
+            "}); "
+            "return matched; "
+            "})()"
+        )
+
+    @classmethod
+    def _candidate_row_show_expr(
+        cls,
+        search_model: str,
+        page_model: str,
+        search_texts: List[str],
+        row_index: int,
+    ) -> str:
+        filtered_indexes = cls._candidate_filtered_indexes_expr(search_model, search_texts)
         return (
             "{{ (() => { "
-            f"const query = String(model.{search_model} || '').trim().toLowerCase(); "
-            f"const haystack = {candidate_text}; "
-            "return !query || haystack.includes(query); "
+            f"const matched = {filtered_indexes}; "
+            f"const pageSize = {cls.FORM_CANDIDATE_PAGE_SIZE}; "
+            "const totalPages = Math.max(1, Math.ceil(matched.length / pageSize)); "
+            f"const rawPage = Number(model.{page_model} || 1); "
+            "const page = Math.min(Math.max(Number.isFinite(rawPage) ? Math.trunc(rawPage) : 1, 1), totalPages); "
+            "const start = (page - 1) * pageSize; "
+            "const end = start + pageSize; "
+            f"return matched.slice(start, end).includes({int(row_index)}); "
+            "})() }}"
+        )
+
+    @classmethod
+    def _candidate_page_length_expr(cls, search_model: str, search_texts: List[str]) -> str:
+        filtered_indexes = cls._candidate_filtered_indexes_expr(search_model, search_texts)
+        return (
+            "{{ (() => { "
+            f"const matched = {filtered_indexes}; "
+            f"return Math.max(1, Math.ceil(matched.length / {cls.FORM_CANDIDATE_PAGE_SIZE})); "
+            "})() }}"
+        )
+
+    @classmethod
+    def _candidate_pagination_needed_expr(cls, search_model: str, search_texts: List[str]) -> str:
+        filtered_indexes = cls._candidate_filtered_indexes_expr(search_model, search_texts)
+        return (
+            "{{ (() => { "
+            f"const matched = {filtered_indexes}; "
+            f"return matched.length > {cls.FORM_CANDIDATE_PAGE_SIZE}; "
+            "})() }}"
+        )
+
+    @classmethod
+    def _candidate_page_summary_expr(
+        cls,
+        search_model: str,
+        page_model: str,
+        search_texts: List[str],
+        media_label: str,
+    ) -> str:
+        filtered_indexes = cls._candidate_filtered_indexes_expr(search_model, search_texts)
+        media_label_value = cls._js_value(media_label)
+        return (
+            "{{ (() => { "
+            f"const matched = {filtered_indexes}; "
+            f"const mediaLabel = {media_label_value}; "
+            f"const pageSize = {cls.FORM_CANDIDATE_PAGE_SIZE}; "
+            "const total = matched.length; "
+            "if (!total) { return `当前没有命中的${mediaLabel}候选`; } "
+            "const totalPages = Math.max(1, Math.ceil(total / pageSize)); "
+            f"const rawPage = Number(model.{page_model} || 1); "
+            "const page = Math.min(Math.max(Number.isFinite(rawPage) ? Math.trunc(rawPage) : 1, 1), totalPages); "
+            "return `当前命中 ${total} 个${mediaLabel}候选，共 ${totalPages} 页，当前第 ${page} 页`; "
             "})() }}"
         )
 

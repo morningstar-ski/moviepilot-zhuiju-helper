@@ -583,6 +583,8 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("清空白名单", form_text)
         self.assertIn("电影追更名单", form_text)
         self.assertIn("插件会继续关注这部剧后面的新一季", form_text)
+        self.assertIn("候选检索", form_text)
+        self.assertIn("统一搜索候选剧集/电影", form_text)
         self.assertIn("均摊周期 Cron", form_text)
         self.assertIn("每分钟最多 5 次", form_text)
         self.assertIn("电影手动关联（高级）", form_text)
@@ -592,8 +594,11 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("TMDB collection", form_text)
         self.assertEqual("", model["tv_candidate_id"])
         self.assertEqual("", model["movie_remove_id"])
-        self.assertEqual("", model["tv_search_text"])
-        self.assertEqual("", model["movie_search_text"])
+        self.assertEqual("", model["candidate_search_text"])
+        self.assertEqual(1, model["tv_candidate_page"])
+        self.assertEqual(1, model["movie_candidate_page"])
+        self.assertNotIn("tv_search_text", model)
+        self.assertNotIn("movie_search_text", model)
         self.assertEqual(5, model["max_tmdb_calls_per_minute"])
 
     def test_candidate_lookup_dedupes_and_sorts_by_recent_time(self):
@@ -674,9 +679,12 @@ class PluginPageTests(unittest.TestCase):
         form, _ = plugin.get_form()
         form_text = repr(form)
 
-        self.assertIn("搜剧名或年份", form_text)
+        self.assertIn("统一搜索候选剧集/电影", form_text)
         self.assertIn("Rick and Morty", form_text)
         self.assertIn("加入白名单", form_text)
+        self.assertIn("VPagination", form_text)
+        self.assertIn("tv_candidate_page", form_text)
+        self.assertNotIn("搜剧名或年份", form_text)
 
     def test_selected_entries_bootstrap_tracks_from_local_catalog(self):
         plugin_module = load_plugin_module()
