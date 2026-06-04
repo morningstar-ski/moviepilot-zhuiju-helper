@@ -187,6 +187,20 @@ def load_plugin_module():
     return module
 
 
+def iter_component_nodes(tree):
+    if isinstance(tree, dict):
+        yield tree
+        content = tree.get("content")
+        if isinstance(content, list):
+            for item in content:
+                yield from iter_component_nodes(item)
+        elif isinstance(content, dict):
+            yield from iter_component_nodes(content)
+    elif isinstance(tree, list):
+        for item in tree:
+            yield from iter_component_nodes(item)
+
+
 class LogicTests(unittest.TestCase):
     def test_select_ready_tv_seasons_filters_future_pending_and_season_zero(self):
         seasons = [
@@ -603,6 +617,24 @@ class PluginPageTests(unittest.TestCase):
         self.assertNotIn("movie_search_text", model)
         self.assertEqual(5, model["max_tmdb_calls_per_minute"])
 
+    def test_form_section_show_expressions_use_model_scope(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin({"enabled": True, "enable_tv": True, "enable_movie": True})
+
+        form, _ = plugin.get_form()
+        show_values = [
+            str((node.get("props") or {}).get("show", ""))
+            for node in iter_component_nodes(form)
+            if node.get("component") == "VCard" and "show" in (node.get("props") or {})
+        ]
+
+        self.assertIn("{{ model.enable_tv !== false }}", show_values)
+        self.assertIn("{{ model.enable_movie !== false }}", show_values)
+        self.assertNotIn("{{ enable_tv }}", show_values)
+        self.assertNotIn("{{ enable_movie }}", show_values)
+        self.assertFalse(any(node.get("component") == "VSheet" for node in iter_component_nodes(form)))
+
     def test_candidate_lookup_dedupes_and_sorts_by_recent_time(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
@@ -689,6 +721,50 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("VPagination", form_text)
         self.assertIn("tv_candidate_page", form_text)
         self.assertNotIn("搜剧名或年份", form_text)
+
+        nodes = list(iter_component_nodes(form))
+        self.assertTrue(
+            any(
+                node.get("component") == "tr"
+                and "tv_candidate_page" in str((node.get("props") or {}).get("show", ""))
+                for node in nodes
+            )
+        )
+        self.assertTrue(any(node.get("component") == "VTable" for node in nodes))
+        self.assertFalse(
+            any(
+                node.get("component") == "VCard"
+                and "nrt-candidate-row" in str((node.get("props") or {}).get("class", ""))
+                for node in nodes
+            )
+        )
+        self.assertFalse(any("{{ (() => {" in str(node.get("text", "")) for node in nodes))
+        self.assertIn("超过 24 条时可翻页", form_text)
+
+    def test_form_candidates_ignore_tmdb_discover_noise(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin_module.TransferHistoryOper = lambda: types.SimpleNamespace(list_by_date=lambda _cutoff: [])
+        plugin_module.SubscribeOper = lambda: types.SimpleNamespace(list=lambda state=None: [])
+        plugin._tmdb_discover_candidates = lambda media_type: [
+            types.SimpleNamespace(
+                tmdb_id=60625 if media_type == plugin_module.MediaType.TV.value else 603,
+                title="Discover Candidate",
+                year="2026",
+                release_date="2026-06-03",
+                number_of_seasons=9,
+            )
+        ]
+
+        plugin.init_plugin({"enabled": True, "enable_tv": True, "enable_movie": True})
+
+        tv_candidates, hidden_tv_candidates = plugin._sorted_form_candidates(plugin_module.MediaType.TV.value)
+        movie_candidates, hidden_movie_candidates = plugin._sorted_form_candidates(plugin_module.MediaType.MOVIE.value)
+
+        self.assertEqual([], tv_candidates)
+        self.assertEqual([], movie_candidates)
+        self.assertEqual(0, hidden_tv_candidates)
+        self.assertEqual(0, hidden_movie_candidates)
 
     def test_selected_entries_bootstrap_tracks_from_local_catalog(self):
         plugin_module = load_plugin_module()

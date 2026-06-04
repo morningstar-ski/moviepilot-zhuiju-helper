@@ -299,7 +299,10 @@ class NextReleaseTracker(_PluginBase):
                                 "props": {
                                     "type": "info",
                                     "variant": "tonal",
-                                    "text": f"候选列表默认每组每页显示 {self.FORM_CANDIDATE_PAGE_SIZE} 条，避免一屏拉太长；需要时再翻页。",
+                                    "text": (
+                                        f"候选列表默认每组每页显示 {self.FORM_CANDIDATE_PAGE_SIZE} 条，"
+                                        f"超过 {self.FORM_CANDIDATE_PAGE_SIZE} 条时可翻页，避免一屏拉太长。"
+                                    ),
                                 },
                             },
                         ],
@@ -318,7 +321,7 @@ class NextReleaseTracker(_PluginBase):
                         candidates=tv_candidates,
                         hidden_candidate_count=hidden_tv_candidates,
                         candidate_note="加入后，插件会继续关注这部剧后面的新一季，不会回头把更早的旧季再提示一遍；但“已追到哪一季”只会参考本地入库和订阅记录，不会单靠 TMDB 猜。特别篇、番外、重启版这类内容，一般不会算成同一部剧的下一季。",
-                        show_expr="{{ enable_tv }}",
+                        show_expr="{{ model.enable_tv !== false }}",
                     ),
                     self._form_selection_editor(
                         title="电影追更名单",
@@ -334,7 +337,7 @@ class NextReleaseTracker(_PluginBase):
                         candidates=movie_candidates,
                         hidden_candidate_count=hidden_movie_candidates,
                         candidate_note="电影默认只会按 TMDB collection 自动找下一部；TMDB 没给 collection 的电影不会自动猜，需要你手动补关联。",
-                        show_expr="{{ enable_movie }}",
+                        show_expr="{{ model.enable_movie !== false }}",
                     ),
                     self._form_section_card(
                         title="高级设置（一般不用动）",
@@ -2193,7 +2196,20 @@ class NextReleaseTracker(_PluginBase):
         return "\n".join(str(value) for value in normalize_tmdb_id_list(values))
 
     @staticmethod
-    def _form_section_card(title: str, subtitle: str, content: List[dict], show_expr: Optional[str] = None) -> dict:
+    def _form_section_card(
+        title: str,
+        subtitle: str,
+        content: List[dict],
+        show_expr: Optional[str] = None,
+        body_component: str = "VCardText",
+        body_props: Optional[Dict[str, Any]] = None,
+    ) -> dict:
+        card_body = {
+            "component": body_component,
+            "content": content,
+        }
+        if body_props:
+            card_body["props"] = dict(body_props)
         props: Dict[str, Any] = {"variant": "outlined", "class": "mb-4"}
         if show_expr:
             props["show"] = show_expr
@@ -2208,7 +2224,7 @@ class NextReleaseTracker(_PluginBase):
                         {"component": "VCardSubtitle", "text": subtitle},
                     ],
                 },
-                {"component": "VCardText", "content": content},
+                card_body,
             ],
         }
 
@@ -2288,14 +2304,6 @@ class NextReleaseTracker(_PluginBase):
             show_expr=show_expr,
             content=[
                 saved_summary,
-                {
-                    "component": "VAlert",
-                    "props": {
-                        "type": "info",
-                        "variant": "tonal",
-                        "text": self._selection_summary_expr(model_key, media_label),
-                    },
-                },
                 *candidate_content,
                 {
                     "component": "VRow",
@@ -2831,33 +2839,6 @@ class NextReleaseTracker(_PluginBase):
                 baseline_season=coerce_int(getattr(subscription, "season", None)) if media_type == MediaType.TV.value else None,
             )
 
-        for candidate in self._tmdb_discover_candidates(MediaType.TV.value):
-            tmdb_id = coerce_int(self._media_value(candidate, "tmdb_id"))
-            if not tmdb_id:
-                continue
-            self._merge_candidate_lookup(
-                tv_lookup,
-                tmdb_id=tmdb_id,
-                title=self._as_str(self._media_value(candidate, "title")) or f"TMDB-{tmdb_id}",
-                year=self._as_str(self._media_value(candidate, "year")),
-                last_seen_at=self._as_str(self._media_value(candidate, "release_date")),
-                source_label="TMDB发现",
-                latest_season=coerce_int(self._media_value(candidate, "number_of_seasons")),
-            )
-
-        for candidate in self._tmdb_discover_candidates(MediaType.MOVIE.value):
-            tmdb_id = coerce_int(self._media_value(candidate, "tmdb_id"))
-            if not tmdb_id:
-                continue
-            self._merge_candidate_lookup(
-                movie_lookup,
-                tmdb_id=tmdb_id,
-                title=self._as_str(self._media_value(candidate, "title")) or f"TMDB-{tmdb_id}",
-                year=self._as_str(self._media_value(candidate, "year")),
-                last_seen_at=self._as_str(self._media_value(candidate, "release_date")),
-                source_label="TMDB发现",
-            )
-
         return tv_lookup, movie_lookup
 
     def _tmdb_discover_candidates(self, media_type: str) -> List[Any]:
@@ -3040,15 +3021,8 @@ class NextReleaseTracker(_PluginBase):
                 },
                 {
                     "component": "div",
-                    "props": {
-                        "class": "d-flex flex-column flex-md-row align-start align-md-center justify-space-between ga-3 mt-3"
-                    },
+                    "props": {"class": "d-flex justify-end mt-3"},
                     "content": [
-                        {
-                            "component": "div",
-                            "props": {"class": "text-caption text-medium-emphasis"},
-                            "text": self._candidate_page_summary_expr(search_model, page_model, search_texts, media_label),
-                        },
                         {
                             "component": "div",
                             "props": {"show": self._candidate_pagination_needed_expr(search_model, search_texts)},
@@ -3123,30 +3097,6 @@ class NextReleaseTracker(_PluginBase):
             "{{ (() => { "
             f"const matched = {filtered_indexes}; "
             f"return matched.length > {cls.FORM_CANDIDATE_PAGE_SIZE}; "
-            "})() }}"
-        )
-
-    @classmethod
-    def _candidate_page_summary_expr(
-        cls,
-        search_model: str,
-        page_model: str,
-        search_texts: List[str],
-        media_label: str,
-    ) -> str:
-        filtered_indexes = cls._candidate_filtered_indexes_expr(search_model, search_texts)
-        media_label_value = cls._js_value(media_label)
-        return (
-            "{{ (() => { "
-            f"const matched = {filtered_indexes}; "
-            f"const mediaLabel = {media_label_value}; "
-            f"const pageSize = {cls.FORM_CANDIDATE_PAGE_SIZE}; "
-            "const total = matched.length; "
-            "if (!total) { return `当前没有命中的${mediaLabel}候选`; } "
-            "const totalPages = Math.max(1, Math.ceil(total / pageSize)); "
-            f"const rawPage = Number(model.{page_model} || 1); "
-            "const page = Math.min(Math.max(Number.isFinite(rawPage) ? Math.trunc(rawPage) : 1, 1), totalPages); "
-            "return `当前命中 ${total} 个${mediaLabel}候选，共 ${totalPages} 页，当前第 ${page} 页`; "
             "})() }}"
         )
 
