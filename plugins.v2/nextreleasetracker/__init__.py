@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import json
+import math
 import re
 from threading import Lock
 import time
@@ -37,22 +38,28 @@ from .logic import (
 from .state import TrackerStateStore
 
 
+class ScanBudgetExhausted(RuntimeError):
+    pass
+
+
 class NextReleaseTracker(_PluginBase):
     plugin_name = "追剧助手"
     plugin_desc = (
-        "Track only user-selected TV shows and movies, notify once when the next "
-        "season or sequel appears, then finish tracking."
+        "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.7"
-    plugin_author = "Codex"
-    author_url = "https://openai.com"
+    plugin_version = "1.1.8"
+    plugin_author = "morningstar-ski"
+    author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
     plugin_order = 30
     auth_level = 1
     diagnostic_tv_tmdb_id = 9900001
     diagnostic_tv_title = "NRT Diagnostic Series"
     FORM_CANDIDATE_LIMIT = 120
+    DEFAULT_CRON = "0 3 * * 1"
+    MAX_TMDB_CALLS_PER_MINUTE_CAP = 5
+    SCAN_TICK_CRON = "* * * * *"
     CONFIG_FIELDS = (
         "enabled",
         "notify",
@@ -64,6 +71,7 @@ class NextReleaseTracker(_PluginBase):
         "grace_days",
         "history_days",
         "log_retention",
+        "max_tmdb_calls_per_minute",
         "tracked_tv_ids",
         "tracked_movie_ids",
         "manual_movie_mappings",
@@ -75,10 +83,11 @@ class NextReleaseTracker(_PluginBase):
     _enable_movie = False
     _backfill_on_enable = False
     _onlyonce = False
-    _cron = "0 3 * * 1"
+    _cron = DEFAULT_CRON
     _grace_days = 3
     _history_days = 365
     _log_retention = 200
+    _max_tmdb_calls_per_minute = MAX_TMDB_CALLS_PER_MINUTE_CAP
     _selected_tv_ids: List[int] = []
     _selected_movie_ids: List[int] = []
 
@@ -101,6 +110,7 @@ class NextReleaseTracker(_PluginBase):
         self._grace_days = normalized_config["grace_days"]
         self._history_days = normalized_config["history_days"]
         self._log_retention = normalized_config["log_retention"]
+        self._max_tmdb_calls_per_minute = normalized_config["max_tmdb_calls_per_minute"]
         self._selected_tv_ids = self._parse_track_selection(normalized_config["tracked_tv_ids"])
         self._selected_movie_ids = self._parse_track_selection(normalized_config["tracked_movie_ids"])
 
@@ -218,7 +228,7 @@ class NextReleaseTracker(_PluginBase):
                     },
                     self._form_section_card(
                         title="基础开关与定时任务",
-                        subtitle="先打开插件，再设置多久检查一次。下面的添加和删除只是先改当前页面，记得点“保存”后才会真正生效。",
+                        subtitle="先打开插件，再设置希望多久完成一轮检查。插件会按这个周期把名单均摊到每分钟执行，不会在某一个时刻一次性扫完整个名单。",
                         content=[
                             {
                                 "component": "VAlert",
@@ -245,9 +255,20 @@ class NextReleaseTracker(_PluginBase):
                                 "content": [
                                     self._col(3, self._switch("onlyonce", "立即执行一次")),
                                     self._col(3, self._textfield("grace_days", "提前天数", "默认 3")),
-                                    self._col(3, self._textfield("cron", "定时扫描 Cron", "0 3 * * 1")),
+                                    self._col(3, self._textfield("cron", "均摊周期 Cron", "0 3 * * 1")),
                                     self._col(3, self._textfield("history_days", "历史回填天数", "默认 365")),
                                 ],
+                            },
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "variant": "tonal",
+                                    "text": (
+                                        "例如填 `0 3 * * 1` 代表希望一周内扫完一轮；"
+                                        "插件内部会按分钟均摊推进，并把 TMDB 调用限制在每分钟最多 5 次。"
+                                    ),
+                                },
                             },
                         ],
                     ),
@@ -278,18 +299,19 @@ class NextReleaseTracker(_PluginBase):
                         saved_summary=self._selection_snapshot_alert("电影", self._selected_movie_ids, movie_tracks, True),
                         candidates=movie_candidates,
                         hidden_candidate_count=hidden_movie_candidates,
-                        candidate_note="大多数电影系列都能自动识别；如果某一部没认出来，再手动补一次关联就行。",
+                        candidate_note="电影默认只会按 TMDB collection 自动找下一部；TMDB 没给 collection 的电影不会自动猜，需要你手动补关联。",
                         show_expr="{{ enable_movie }}",
                     ),
                     self._form_section_card(
                         title="高级设置（一般不用动）",
-                        subtitle="只有在你想补扫旧记录，或者某个电影系列没自动认出来时，才需要来这里设置。",
+                        subtitle="只有在你想补扫旧记录、调低分钟调用上限，或者某个电影系列没自动认出来时，才需要来这里设置。",
                         content=[
                             {
                                 "component": "VRow",
                                 "content": [
                                     self._col(6, self._switch("backfill_on_enable", "首次启用时回填历史")),
-                                    self._col(6, self._textfield("log_retention", "日志保留条数", "默认 200")),
+                                    self._col(3, self._textfield("log_retention", "日志保留条数", "默认 200")),
+                                    self._col(3, self._textfield("max_tmdb_calls_per_minute", "每分钟 TMDB 上限", "默认 5，最高 5")),
                                 ],
                             },
                             {
@@ -299,7 +321,7 @@ class NextReleaseTracker(_PluginBase):
                                     "variant": "tonal",
                                     "text": (
                                         "只有加入追更名单的内容，插件才会继续帮你关注。"
-                                        "大多数电影系列都能自动识别，少数没认出来的再手动补一次关联就行。"
+                                        "电影自动找续作时只认 TMDB collection；没有 collection 的电影，必须手动补关联。"
                                     ),
                                 },
                             },
@@ -307,7 +329,7 @@ class NextReleaseTracker(_PluginBase):
                     ),
                     self._form_section_card(
                         title="电影手动关联（高级）",
-                        subtitle="如果某个电影系列没自动认出来，可以在这里手动告诉插件它后面还要继续关注哪些电影。",
+                        subtitle="如果 TMDB 没给某部电影挂 collection，或者你想指定更明确的续作链，可以在这里手动告诉插件后面还要继续关注哪些电影。",
                         content=[
                             {
                                 "component": "VAlert",
@@ -351,6 +373,7 @@ class NextReleaseTracker(_PluginBase):
             "grace_days": 3,
             "history_days": 365,
             "log_retention": 200,
+            "max_tmdb_calls_per_minute": 5,
             "tracked_tv_ids": "",
             "tracked_movie_ids": "",
             "manual_movie_mappings": "",
@@ -369,6 +392,8 @@ class NextReleaseTracker(_PluginBase):
         mappings = state.get(TrackerStateStore.KEY_MANUAL_MAPPINGS, {})
         logs = list(reversed(state.get(TrackerStateStore.KEY_ACTION_LOG, [])))[:20]
         runtime = state.get(TrackerStateStore.KEY_RUNTIME_STATE, {})
+        scan_plan = runtime.get("scan_plan") or {}
+        tmdb_rate_limit = runtime.get("tmdb_rate_limit") or {}
         last_scan = runtime.get("last_scan_summary") or {}
         last_history = runtime.get("last_history_import") or {}
         last_diagnostic = runtime.get("last_diagnostic") or {}
@@ -433,7 +458,7 @@ class NextReleaseTracker(_PluginBase):
                         "props": {
                             "type": "warning",
                             "variant": "tonal",
-                            "text": "只有加入追更名单的内容，插件才会继续帮你关注。发现新一季或下一部后，会提醒你一次，然后结束这条追踪。",
+                            "text": "只有加入追更名单的内容，插件才会继续帮你关注。电影默认只按 TMDB collection 自动找下一部；TMDB 没有 collection 的电影，需要去配置页手动补关联。",
                         },
                     },
                     {
@@ -442,7 +467,8 @@ class NextReleaseTracker(_PluginBase):
                             "type": "success" if self._enabled else "warning",
                             "variant": "tonal",
                             "text": (
-                                f"当前模式：{plugin_mode} | 定时任务：{self._cron or '未配置'} | "
+                                f"当前模式：{plugin_mode} | 均摊周期：{self._cron or '未配置'} | "
+                                f"分钟上限：{self._max_tmdb_calls_per_minute} 次 TMDB 调用 | "
                                 f"通知：{'开启' if self._notify else '关闭'} | "
                                 f"已加入名单：{selected_total} 项 | 正在追踪：{active_total} 条"
                             ) if self._enabled else (
@@ -468,6 +494,7 @@ class NextReleaseTracker(_PluginBase):
                                     self._chip("插件已启用" if self._enabled else "插件未启用", "success" if self._enabled else "warning", "mdi-power"),
                                     self._chip(f"模式 {plugin_mode}", "primary", "mdi-view-dashboard"),
                                     self._chip(f"最近扫描 {scan_scope}", "info", "mdi-radar"),
+                                    self._chip(f"分钟已用 {coerce_int(tmdb_rate_limit.get('used'), 0) or 0}/{self._max_tmdb_calls_per_minute}", "warning", "mdi-speedometer"),
                                     self._chip(f"错误 {last_scan.get('errors', 0)}", "error" if last_scan.get("errors", 0) else "success", "mdi-alert-circle-outline"),
                                 ]
                             ),
@@ -476,9 +503,13 @@ class NextReleaseTracker(_PluginBase):
                                 [
                                     ["最近扫描时间", scan_finished_at],
                                     ["扫描来源", scan_reason],
+                                    ["当前周期", self._cron or "-"],
+                                    ["当前周期剩余", f"{len(scan_plan.get('pending_task_ids') or [])} / {len(scan_plan.get('task_ids') or []) or 0}"],
+                                    ["本分钟已用", f"{coerce_int(tmdb_rate_limit.get('used'), 0) or 0} / {self._max_tmdb_calls_per_minute}"],
                                     ["发送通知", last_scan.get("notifications_sent", 0)],
                                     ["结束追踪", last_scan.get("tracks_completed", 0)],
                                     ["更新追踪状态", last_scan.get("tracks_updated", 0)],
+                                    ["分钟预算耗尽", "是" if last_scan.get("budget_exhausted") else "否"],
                                     ["命中已存在订阅", last_scan.get("existing_subscriptions", 0)],
                                     ["命中媒体库", last_scan.get("existing_in_library", 0)],
                                     ["历史回填摘要", history_summary],
@@ -659,11 +690,11 @@ class NextReleaseTracker(_PluginBase):
         if self._enabled and (self._enable_tv or self._enable_movie) and self._cron:
             services.append(
                 {
-                    "id": "scan",
-                    "name": "Next release tracker scan",
-                    "trigger": CronTrigger.from_crontab(self._cron),
+                    "id": "scan_tick",
+                    "name": "Next release tracker paced scan tick",
+                    "trigger": CronTrigger.from_crontab(self.SCAN_TICK_CRON),
                     "func": self.service_scan,
-                    "func_kwargs": {"scope": "all", "reason": "cron", "notify": None},
+                    "func_kwargs": {"scope": "all", "reason": "cron_tick", "notify": None},
                     "kwargs": {},
                 }
             )
@@ -764,7 +795,7 @@ class NextReleaseTracker(_PluginBase):
                 last_transfer_history_id=history_id,
             )
 
-    def service_scan(self, scope: str = "all", reason: str = "cron", notify: Optional[bool] = None):
+    def service_scan(self, scope: str = "all", reason: str = "cron_tick", notify: Optional[bool] = None):
         return self._run_rescan(scope=scope, reason=reason, notify=notify)
 
     def run_once_scan(self):
@@ -1017,11 +1048,21 @@ class NextReleaseTracker(_PluginBase):
             }
 
         notify_flag = self._notify if notify is None else bool(notify)
+        tmdb_budget = self._create_tmdb_budget()
+        scan_cache: Dict[str, Dict[Any, Any]] = {
+            "media": {},
+            "tv_seasons": {},
+            "movie_collection": {},
+        }
+        task_plan = self._resolve_scan_task_plan(scope=scope, reason=reason)
         summary: Dict[str, Any] = {
             "success": True,
             "scope": scope,
             "reason": reason,
             "started_at": self._now(),
+            "period_minutes": task_plan["period_minutes"],
+            "planned_tracks": len(task_plan["task_ids"]),
+            "remaining_tracks": task_plan["remaining_before"],
             "scanned_tv": 0,
             "scanned_movie": 0,
             "tv_candidates": 0,
@@ -1032,6 +1073,9 @@ class NextReleaseTracker(_PluginBase):
             "existing_in_library": 0,
             "existing_subscriptions": 0,
             "errors": 0,
+            "budget_exhausted": False,
+            "tmdb_calls_limit": tmdb_budget["limit"],
+            "tmdb_calls_used": 0,
         }
 
         self._ensure_state_store().update_runtime(
@@ -1042,11 +1086,45 @@ class NextReleaseTracker(_PluginBase):
             }
         )
 
+        processed_task_ids: List[str] = []
         try:
-            if scope in {"all", "tv"} and self._enable_tv:
-                self._scan_tv(summary, notify_flag)
-            if scope in {"all", "movie"} and self._enable_movie:
-                self._scan_movies(summary, notify_flag)
+            for task_id in task_plan["task_ids"]:
+                task = task_plan["task_map"].get(task_id)
+                if not task:
+                    processed_task_ids.append(task_id)
+                    continue
+                try:
+                    self._process_scan_task(
+                        task=task,
+                        summary=summary,
+                        notify_flag=notify_flag,
+                        scan_cache=scan_cache,
+                        tmdb_budget=tmdb_budget,
+                    )
+                    processed_task_ids.append(task_id)
+                except ScanBudgetExhausted:
+                    summary["budget_exhausted"] = True
+                    summary["message"] = (
+                        f"已达到本分钟 TMDB 调用上限 {tmdb_budget['limit']} 次，"
+                        "剩余条目会留到下一分钟继续。"
+                    )
+                    self._log(
+                        "warning",
+                        "scan_budget",
+                        summary["message"],
+                        {"scope": scope, "reason": reason},
+                    )
+                    break
+                except Exception as exc:
+                    logger.exception("[NextReleaseTracker] scan task failed")
+                    summary["errors"] += 1
+                    processed_task_ids.append(task_id)
+                    self._log(
+                        "error",
+                        "scan_track",
+                        f"扫描条目失败：{task_id} - {exc}",
+                        {"scope": scope, "reason": reason, "task_id": task_id},
+                    )
         except Exception as exc:
             logger.exception("[NextReleaseTracker] scan failed")
             summary["success"] = False
@@ -1054,200 +1132,515 @@ class NextReleaseTracker(_PluginBase):
             summary["message"] = f"scan failed: {exc}"
             self._log("error", "scan", summary["message"])
         finally:
+            self._commit_scan_task_progress(task_plan, processed_task_ids)
+            summary["tmdb_calls_used"] = tmdb_budget["used"] - tmdb_budget["used_before"]
+            summary["remaining_tracks"] = self._remaining_scan_tasks(task_plan, processed_task_ids)
             summary["finished_at"] = self._now()
-            self._ensure_state_store().update_runtime(
-                {
-                    "last_scan_finished_at": summary["finished_at"],
-                    "last_scan_summary": summary,
-                }
-            )
+            runtime_patch = {}
+            if reason != "cron_tick" or summary["planned_tracks"] or summary["errors"] or summary["budget_exhausted"]:
+                runtime_patch["last_scan_finished_at"] = summary["finished_at"]
+                runtime_patch["last_scan_summary"] = summary
+            if runtime_patch:
+                self._ensure_state_store().update_runtime(runtime_patch)
             self._scan_lock.release()
 
         if notify_flag and summary["errors"]:
             self._notify_summary(summary)
         return summary
 
-    def _scan_tv(self, summary: Dict[str, Any], notify_flag: bool) -> None:
-        tv_tracks = self._ensure_state_store().get_tv_tracks()
-        for track in list(tv_tracks.values()):
-            tmdb_id = coerce_int(track.get("tmdb_id"))
-            if not tmdb_id:
-                continue
-
-            summary["scanned_tv"] += 1
-            seasons = (self._tmdb_chain or TmdbChain()).tmdb_seasons(tmdb_id) or []
-            candidates = select_ready_tv_seasons(
-                latest_season=coerce_int(track.get("latest_season"), 0) or 0,
-                pending_seasons=track.get("pending_seasons"),
-                seasons=seasons,
-                grace_days=self._grace_days,
+    def _process_scan_task(
+        self,
+        *,
+        task: Dict[str, Any],
+        summary: Dict[str, Any],
+        notify_flag: bool,
+        scan_cache: Dict[str, Dict[Any, Any]],
+        tmdb_budget: Dict[str, Any],
+    ) -> None:
+        if task.get("kind") == "tv":
+            self._process_tv_scan_task(
+                task=task,
+                summary=summary,
+                notify_flag=notify_flag,
+                scan_cache=scan_cache,
+                tmdb_budget=tmdb_budget,
             )
-            summary["tv_candidates"] += len(candidates)
-            if not candidates:
-                continue
+            return
+        if task.get("kind") == "movie":
+            self._process_movie_scan_task(
+                task=task,
+                summary=summary,
+                notify_flag=notify_flag,
+                scan_cache=scan_cache,
+                tmdb_budget=tmdb_budget,
+            )
+            return
+        raise ValueError(f"Unknown scan task kind: {task.get('kind')}")
 
-            media = self._recognize_media(tmdb_id=tmdb_id, mtype=MediaType.TV)
-            exists_info = (self._media_server_chain or MediaServerChain()).media_exists(media) if media else None
-            title = track.get("title") or self._media_value(media, "title") or f"TMDB-{tmdb_id}"
-            year = self._as_str(track.get("year") or self._media_value(media, "year"))
-            current_latest_season = coerce_int(track.get("latest_season"), 0) or 0
-            detected_seasons = [candidate.season_number for candidate in candidates]
-            resolved_seasons: List[int] = []
-            available_seasons: List[int] = []
-            status: Optional[str] = None
+    def _process_tv_scan_task(
+        self,
+        *,
+        task: Dict[str, Any],
+        summary: Dict[str, Any],
+        notify_flag: bool,
+        scan_cache: Dict[str, Dict[Any, Any]],
+        tmdb_budget: Dict[str, Any],
+    ) -> None:
+        track = self._ensure_state_store().get_tv_tracks().get(task.get("track_key"))
+        tmdb_id = coerce_int((track or {}).get("tmdb_id"))
+        if not track or not tmdb_id:
+            return
 
-            for candidate in candidates:
-                if season_fully_exists(exists_info, candidate.season_number, candidate.episode_count):
-                    self._log("info", "tv_scan", f"Season already in library: {title} season {candidate.season_number}", {"tmdb_id": tmdb_id})
-                    summary["existing_in_library"] += 1
-                    status = self._merge_release_status(status, "library")
-                    resolved_seasons.append(candidate.season_number)
-                    continue
+        seasons = self._load_tv_seasons(tmdb_id=tmdb_id, scan_cache=scan_cache, tmdb_budget=tmdb_budget)
+        summary["scanned_tv"] += 1
+        candidates = select_ready_tv_seasons(
+            latest_season=coerce_int(track.get("latest_season"), 0) or 0,
+            pending_seasons=track.get("pending_seasons"),
+            seasons=seasons,
+            grace_days=self._grace_days,
+        )
+        summary["tv_candidates"] += len(candidates)
+        if not candidates:
+            return
 
-                if self._subscribe_exists(tmdb_id=tmdb_id, season=candidate.season_number):
-                    self._log("info", "tv_scan", f"Season already subscribed: {title} season {candidate.season_number}", {"tmdb_id": tmdb_id})
-                    summary["existing_subscriptions"] += 1
-                    status = self._merge_release_status(status, "subscription")
-                    resolved_seasons.append(candidate.season_number)
-                    continue
+        media = self._recognize_media(
+            tmdb_id=tmdb_id,
+            mtype=MediaType.TV,
+            scan_cache=scan_cache,
+            tmdb_budget=tmdb_budget,
+        )
+        exists_info = (self._media_server_chain or MediaServerChain()).media_exists(media) if media else None
+        title = track.get("title") or self._media_value(media, "title") or f"TMDB-{tmdb_id}"
+        year = self._as_str(track.get("year") or self._media_value(media, "year"))
+        current_latest_season = coerce_int(track.get("latest_season"), 0) or 0
+        detected_seasons = [candidate.season_number for candidate in candidates]
+        resolved_seasons: List[int] = []
+        available_seasons: List[int] = []
+        status: Optional[str] = None
 
-                self._log("success", "tv_detected", f"Detected next TV season: {title} season {candidate.season_number}", {"tmdb_id": tmdb_id})
-                status = self._merge_release_status(status, "available")
-                available_seasons.append(candidate.season_number)
-
-            if not detected_seasons:
-                continue
-            if notify_flag:
-                self._notify_tv_release(
-                    title=title,
-                    year=year,
-                    tmdb_id=tmdb_id,
-                    seasons=detected_seasons,
-                    status=status or "available",
+        for candidate in candidates:
+            if season_fully_exists(exists_info, candidate.season_number, candidate.episode_count):
+                self._log(
+                    "info",
+                    "tv_scan",
+                    f"Season already in library: {title} season {candidate.season_number}",
+                    {"tmdb_id": tmdb_id},
                 )
-                summary["notifications_sent"] += 1
-                self._complete_tv_tracking(tmdb_id)
-                summary["tracks_completed"] += 1
+                summary["existing_in_library"] += 1
+                status = self._merge_release_status(status, "library")
+                resolved_seasons.append(candidate.season_number)
                 continue
 
-            if available_seasons:
-                first_available_season = min(available_seasons)
-                resolved_before_pending = [
-                    season for season in resolved_seasons
-                    if season < first_available_season
-                ]
-                completed_latest_season = max(resolved_before_pending, default=current_latest_season)
-                if completed_latest_season > current_latest_season:
-                    self._ensure_state_store().acknowledge_tv_completion(
-                        tmdb_id=tmdb_id,
-                        title=title,
-                        year=year,
-                        season=completed_latest_season,
-                        source="scan",
-                    )
-                for season in available_seasons:
-                    self._ensure_state_store().mark_tv_pending(tmdb_id, season)
-                summary["tracks_updated"] += 1
+            if self._subscribe_exists(tmdb_id=tmdb_id, season=candidate.season_number):
+                self._log(
+                    "info",
+                    "tv_scan",
+                    f"Season already subscribed: {title} season {candidate.season_number}",
+                    {"tmdb_id": tmdb_id},
+                )
+                summary["existing_subscriptions"] += 1
+                status = self._merge_release_status(status, "subscription")
+                resolved_seasons.append(candidate.season_number)
                 continue
 
+            self._log(
+                "success",
+                "tv_detected",
+                f"Detected next TV season: {title} season {candidate.season_number}",
+                {"tmdb_id": tmdb_id},
+            )
+            status = self._merge_release_status(status, "available")
+            available_seasons.append(candidate.season_number)
+
+        if not detected_seasons:
+            return
+        if notify_flag:
+            self._notify_tv_release(
+                title=title,
+                year=year,
+                tmdb_id=tmdb_id,
+                seasons=detected_seasons,
+                status=status or "available",
+            )
+            summary["notifications_sent"] += 1
             self._complete_tv_tracking(tmdb_id)
             summary["tracks_completed"] += 1
+            return
 
-    def _scan_movies(self, summary: Dict[str, Any], notify_flag: bool) -> None:
-        movie_tracks = self._ensure_state_store().get_movie_tracks()
-        for track_key, track in list(movie_tracks.items()):
-            summary["scanned_movie"] += 1
-            item_map: Dict[int, MediaInfo] = {}
-
-            collection_id = coerce_int(track.get("collection_id"))
-            if collection_id:
-                for item in (self._tmdb_chain or TmdbChain()).tmdb_collection(collection_id) or []:
-                    item_tmdb_id = coerce_int(self._media_value(item, "tmdb_id"))
-                    if item_tmdb_id:
-                        item_map[item_tmdb_id] = item
-
-            manual_mapping = self._ensure_state_store().get_manual_mapping(coerce_int(track.get("anchor_tmdb_id"), 0) or 0)
-            for target_tmdb_id in (manual_mapping or {}).get("target_tmdb_ids", []):
-                target_tmdb_id = coerce_int(target_tmdb_id)
-                if not target_tmdb_id or target_tmdb_id in item_map:
-                    continue
-                media = self._recognize_media(tmdb_id=target_tmdb_id, mtype=MediaType.MOVIE)
-                if media:
-                    item_map[target_tmdb_id] = media
-
-            candidates = select_ready_collection_movies(
-                known_tmdb_ids=track.get("known_tmdb_ids"),
-                pending_tmdb_ids=track.get("pending_tmdb_ids"),
-                items=item_map.values(),
-                grace_days=self._grace_days,
-            )
-            summary["movie_candidates"] += len(candidates)
-            if not candidates:
-                continue
-
-            detected_candidates = []
-            resolved_candidates = []
-            available_candidates = []
-            status: Optional[str] = None
-            for candidate in candidates:
-                media = item_map.get(candidate.tmdb_id)
-                title = candidate.title or track.get("title") or f"TMDB-{candidate.tmdb_id}"
-                year = candidate.year or self._as_str(track.get("year"))
-                exists_info = (self._media_server_chain or MediaServerChain()).media_exists(media) if media else None
-                detected_candidates.append(candidate)
-
-                if exists_info:
-                    self._log("info", "movie_scan", f"Movie already in library: {title}", {"tmdb_id": candidate.tmdb_id})
-                    summary["existing_in_library"] += 1
-                    status = self._merge_release_status(status, "library")
-                    resolved_candidates.append(candidate)
-                    continue
-
-                if self._subscribe_exists(tmdb_id=candidate.tmdb_id):
-                    self._log("info", "movie_scan", f"Movie already subscribed: {title}", {"tmdb_id": candidate.tmdb_id})
-                    summary["existing_subscriptions"] += 1
-                    status = self._merge_release_status(status, "subscription")
-                    resolved_candidates.append(candidate)
-                    continue
-
-                self._log("success", "movie_detected", f"Detected next movie release: {title}", {"tmdb_id": candidate.tmdb_id})
-                status = self._merge_release_status(status, "available")
-                available_candidates.append(candidate)
-
-            if not detected_candidates:
-                continue
-            if notify_flag:
-                self._notify_movie_release(
-                    title=track.get("title") or f"TMDB-{track.get('anchor_tmdb_id')}",
-                    anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
-                    collection_id=collection_id,
-                    candidates=detected_candidates,
-                    status=status or "available",
+        if available_seasons:
+            first_available_season = min(available_seasons)
+            resolved_before_pending = [
+                season
+                for season in resolved_seasons
+                if season < first_available_season
+            ]
+            completed_latest_season = max(resolved_before_pending, default=current_latest_season)
+            if completed_latest_season > current_latest_season:
+                self._ensure_state_store().acknowledge_tv_completion(
+                    tmdb_id=tmdb_id,
+                    title=title,
+                    year=year,
+                    season=completed_latest_season,
+                    source="scan",
                 )
-                summary["notifications_sent"] += 1
-                self._complete_movie_tracking(track_key=track_key, anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0)
-                summary["tracks_completed"] += 1
+            for season in available_seasons:
+                self._ensure_state_store().mark_tv_pending(tmdb_id, season)
+            summary["tracks_updated"] += 1
+            return
+
+        self._complete_tv_tracking(tmdb_id)
+        summary["tracks_completed"] += 1
+
+    def _process_movie_scan_task(
+        self,
+        *,
+        task: Dict[str, Any],
+        summary: Dict[str, Any],
+        notify_flag: bool,
+        scan_cache: Dict[str, Dict[Any, Any]],
+        tmdb_budget: Dict[str, Any],
+    ) -> None:
+        track_key = str(task.get("track_key") or "")
+        track = self._ensure_state_store().get_movie_tracks().get(track_key)
+        if not track:
+            return
+
+        item_map: Dict[int, MediaInfo] = {}
+        collection_id = coerce_int(track.get("collection_id"))
+        if collection_id:
+            for item in self._load_movie_collection(
+                collection_id=collection_id,
+                scan_cache=scan_cache,
+                tmdb_budget=tmdb_budget,
+            ):
+                item_tmdb_id = coerce_int(self._media_value(item, "tmdb_id"))
+                if item_tmdb_id:
+                    item_map[item_tmdb_id] = item
+
+        manual_mapping = self._ensure_state_store().get_manual_mapping(
+            coerce_int(track.get("anchor_tmdb_id"), 0) or 0
+        )
+        for target_tmdb_id in (manual_mapping or {}).get("target_tmdb_ids", []):
+            target_tmdb_id = coerce_int(target_tmdb_id)
+            if not target_tmdb_id or target_tmdb_id in item_map:
+                continue
+            media = self._recognize_media(
+                tmdb_id=target_tmdb_id,
+                mtype=MediaType.MOVIE,
+                scan_cache=scan_cache,
+                tmdb_budget=tmdb_budget,
+            )
+            if media:
+                item_map[target_tmdb_id] = media
+
+        summary["scanned_movie"] += 1
+        candidates = select_ready_collection_movies(
+            known_tmdb_ids=track.get("known_tmdb_ids"),
+            pending_tmdb_ids=track.get("pending_tmdb_ids"),
+            items=item_map.values(),
+            grace_days=self._grace_days,
+        )
+        summary["movie_candidates"] += len(candidates)
+        if not candidates:
+            return
+
+        detected_candidates = []
+        resolved_candidates = []
+        available_candidates = []
+        status: Optional[str] = None
+        for candidate in candidates:
+            media = item_map.get(candidate.tmdb_id)
+            title = candidate.title or track.get("title") or f"TMDB-{candidate.tmdb_id}"
+            exists_info = (self._media_server_chain or MediaServerChain()).media_exists(media) if media else None
+            detected_candidates.append(candidate)
+
+            if exists_info:
+                self._log("info", "movie_scan", f"Movie already in library: {title}", {"tmdb_id": candidate.tmdb_id})
+                summary["existing_in_library"] += 1
+                status = self._merge_release_status(status, "library")
+                resolved_candidates.append(candidate)
                 continue
 
-            if available_candidates:
-                current_track_key = track_key
-                for candidate in resolved_candidates:
-                    current_track = self._ensure_state_store().acknowledge_movie_completion(
-                        track_key=current_track_key,
-                        tmdb_id=candidate.tmdb_id,
-                        title=candidate.title,
-                        year=candidate.year,
-                        source="scan",
-                        collection_id=candidate.collection_id or collection_id,
-                    )
-                    current_track_key = current_track["track_key"]
-                for candidate in available_candidates:
-                    self._ensure_state_store().mark_movie_pending(current_track_key, candidate.tmdb_id)
-                summary["tracks_updated"] += 1
+            if self._subscribe_exists(tmdb_id=candidate.tmdb_id):
+                self._log(
+                    "info",
+                    "movie_scan",
+                    f"Movie already subscribed: {title}",
+                    {"tmdb_id": candidate.tmdb_id},
+                )
+                summary["existing_subscriptions"] += 1
+                status = self._merge_release_status(status, "subscription")
+                resolved_candidates.append(candidate)
                 continue
 
-            self._complete_movie_tracking(track_key=track_key, anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0)
+            self._log(
+                "success",
+                "movie_detected",
+                f"Detected next movie release: {title}",
+                {"tmdb_id": candidate.tmdb_id},
+            )
+            status = self._merge_release_status(status, "available")
+            available_candidates.append(candidate)
+
+        if not detected_candidates:
+            return
+        if notify_flag:
+            self._notify_movie_release(
+                title=track.get("title") or f"TMDB-{track.get('anchor_tmdb_id')}",
+                anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
+                collection_id=collection_id,
+                candidates=detected_candidates,
+                status=status or "available",
+            )
+            summary["notifications_sent"] += 1
+            self._complete_movie_tracking(
+                track_key=track_key,
+                anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
+            )
             summary["tracks_completed"] += 1
+            return
+
+        if available_candidates:
+            current_track_key = track_key
+            for candidate in resolved_candidates:
+                current_track = self._ensure_state_store().acknowledge_movie_completion(
+                    track_key=current_track_key,
+                    tmdb_id=candidate.tmdb_id,
+                    title=candidate.title,
+                    year=candidate.year,
+                    source="scan",
+                    collection_id=candidate.collection_id or collection_id,
+                )
+                current_track_key = current_track["track_key"]
+            for candidate in available_candidates:
+                self._ensure_state_store().mark_movie_pending(current_track_key, candidate.tmdb_id)
+            summary["tracks_updated"] += 1
+            return
+
+        self._complete_movie_tracking(
+            track_key=track_key,
+            anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
+        )
+        summary["tracks_completed"] += 1
+
+    def _resolve_scan_task_plan(self, *, scope: str, reason: str) -> Dict[str, Any]:
+        task_list = self._build_scan_tasks(scope)
+        task_map = {task["task_id"]: task for task in task_list}
+        if reason == "cron_tick":
+            return self._build_scheduled_task_plan(scope=scope, task_map=task_map)
+        task_ids = list(task_map.keys())
+        return {
+            "scheduled": False,
+            "period_minutes": 0,
+            "task_ids": task_ids,
+            "task_map": task_map,
+            "remaining_before": len(task_ids),
+        }
+
+    def _build_scheduled_task_plan(self, *, scope: str, task_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        store = self._ensure_state_store()
+        runtime = store.get_runtime_state()
+        current_task_ids = list(task_map.keys())
+        period_minutes = self._estimate_cron_period_minutes(self._cron)
+        cycle_started_at = self._parse_runtime_datetime((runtime.get("scan_plan") or {}).get("cycle_started_at"))
+        cycle_config_matches = (
+            isinstance(runtime.get("scan_plan"), dict)
+            and (runtime.get("scan_plan") or {}).get("cron") == self._cron
+            and (runtime.get("scan_plan") or {}).get("scope") == scope
+            and coerce_int((runtime.get("scan_plan") or {}).get("period_minutes"), 0) == period_minutes
+        )
+        now = self._now_dt()
+        reset_cycle = (
+            not cycle_config_matches
+            or not cycle_started_at
+            or now >= cycle_started_at + timedelta(minutes=period_minutes)
+        )
+
+        if reset_cycle:
+            pending_task_ids = list(current_task_ids)
+            plan_state = {
+                "cron": self._cron,
+                "scope": scope,
+                "period_minutes": period_minutes,
+                "cycle_started_at": self._format_runtime_datetime(now),
+                "task_ids": list(current_task_ids),
+                "pending_task_ids": list(pending_task_ids),
+            }
+        else:
+            stored_plan = runtime.get("scan_plan") or {}
+            previous_task_ids = set(stored_plan.get("task_ids") or [])
+            pending_task_ids = [
+                task_id
+                for task_id in (stored_plan.get("pending_task_ids") or [])
+                if task_id in task_map
+            ]
+            pending_seen = set(pending_task_ids)
+            pending_task_ids.extend(
+                task_id
+                for task_id in current_task_ids
+                if task_id not in previous_task_ids and task_id not in pending_seen
+            )
+            plan_state = {
+                "cron": self._cron,
+                "scope": scope,
+                "period_minutes": period_minutes,
+                "cycle_started_at": stored_plan.get("cycle_started_at") or self._format_runtime_datetime(now),
+                "task_ids": list(current_task_ids),
+                "pending_task_ids": list(pending_task_ids),
+            }
+
+        started_at = self._parse_runtime_datetime(plan_state.get("cycle_started_at")) or now
+        total_tasks = len(current_task_ids)
+        processed_tasks = max(total_tasks - len(plan_state["pending_task_ids"]), 0)
+        elapsed_minutes = max(int((now - started_at).total_seconds() // 60), 0)
+        target_completed = min(
+            total_tasks,
+            math.ceil(((elapsed_minutes + 1) * total_tasks) / period_minutes) if total_tasks else 0,
+        )
+        due_count = max(target_completed - processed_tasks, 0)
+        due_task_ids = list(plan_state["pending_task_ids"][:due_count])
+
+        store.update_runtime({"scan_plan": plan_state})
+        return {
+            "scheduled": True,
+            "period_minutes": period_minutes,
+            "task_ids": due_task_ids,
+            "task_map": task_map,
+            "remaining_before": len(plan_state["pending_task_ids"]),
+            "plan_state": plan_state,
+        }
+
+    def _build_scan_tasks(self, scope: str) -> List[Dict[str, Any]]:
+        groups: List[List[Dict[str, Any]]] = []
+        if scope in {"all", "tv"} and self._enable_tv:
+            tv_tracks = self._ensure_state_store().get_tv_tracks()
+            groups.append(
+                [
+                    {
+                        "task_id": f"tv:{track_key}",
+                        "kind": "tv",
+                        "track_key": track_key,
+                    }
+                    for track_key in sorted(tv_tracks.keys(), key=lambda value: coerce_int(value, 0) or 0)
+                ]
+            )
+        if scope in {"all", "movie"} and self._enable_movie:
+            movie_tracks = self._ensure_state_store().get_movie_tracks()
+            groups.append(
+                [
+                    {
+                        "task_id": f"movie:{track_key}",
+                        "kind": "movie",
+                        "track_key": track_key,
+                    }
+                    for track_key in sorted(
+                        movie_tracks.keys(),
+                        key=lambda key: (
+                            coerce_int((movie_tracks.get(key) or {}).get("anchor_tmdb_id"), 0) or 0,
+                            key,
+                        ),
+                    )
+                ]
+            )
+        return self._interleave_scan_groups(groups)
+
+    @staticmethod
+    def _interleave_scan_groups(groups: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        normalized = [group for group in groups if group]
+        if not normalized:
+            return []
+        if len(normalized) == 1:
+            return list(normalized[0])
+        merged: List[Dict[str, Any]] = []
+        max_len = max(len(group) for group in normalized)
+        for index in range(max_len):
+            for group in normalized:
+                if index < len(group):
+                    merged.append(group[index])
+        return merged
+
+    def _commit_scan_task_progress(self, task_plan: Dict[str, Any], processed_task_ids: List[str]) -> None:
+        if not task_plan.get("scheduled") or not processed_task_ids:
+            return
+        processed_set = set(processed_task_ids)
+        plan_state = dict(task_plan.get("plan_state") or {})
+        plan_state["pending_task_ids"] = [
+            task_id
+            for task_id in (plan_state.get("pending_task_ids") or [])
+            if task_id not in processed_set
+        ]
+        self._ensure_state_store().update_runtime({"scan_plan": plan_state})
+        task_plan["plan_state"] = plan_state
+
+    def _remaining_scan_tasks(self, task_plan: Dict[str, Any], processed_task_ids: List[str]) -> int:
+        if task_plan.get("scheduled"):
+            return len((task_plan.get("plan_state") or {}).get("pending_task_ids") or [])
+        return max(task_plan.get("remaining_before", 0) - len(processed_task_ids), 0)
+
+    def _create_tmdb_budget(self) -> Dict[str, Any]:
+        store = self._ensure_state_store()
+        runtime = store.get_runtime_state()
+        limit = self._normalized_tmdb_call_limit(self._max_tmdb_calls_per_minute)
+        minute_key = self._now_dt().strftime("%Y-%m-%d %H:%M")
+        state = runtime.get("tmdb_rate_limit") or {}
+        used = coerce_int(state.get("used"), 0) or 0
+        if state.get("minute") != minute_key:
+            used = 0
+        store.update_runtime(
+            {
+                "tmdb_rate_limit": {
+                    "minute": minute_key,
+                    "used": used,
+                    "limit": limit,
+                }
+            }
+        )
+        return {
+            "limit": limit,
+            "minute": minute_key,
+            "used_before": used,
+            "used": used,
+        }
+
+    def _consume_tmdb_budget(self, tmdb_budget: Dict[str, Any]) -> None:
+        if tmdb_budget["used"] >= tmdb_budget["limit"]:
+            raise ScanBudgetExhausted(f"tmdb minute budget exhausted: {tmdb_budget['minute']}")
+        tmdb_budget["used"] += 1
+        self._ensure_state_store().update_runtime(
+            {
+                "tmdb_rate_limit": {
+                    "minute": tmdb_budget["minute"],
+                    "used": tmdb_budget["used"],
+                    "limit": tmdb_budget["limit"],
+                }
+            }
+        )
+
+    def _load_tv_seasons(
+        self,
+        *,
+        tmdb_id: int,
+        scan_cache: Dict[str, Dict[Any, Any]],
+        tmdb_budget: Dict[str, Any],
+    ) -> List[Any]:
+        cache = scan_cache.setdefault("tv_seasons", {})
+        if tmdb_id not in cache:
+            self._consume_tmdb_budget(tmdb_budget)
+            cache[tmdb_id] = (self._tmdb_chain or TmdbChain()).tmdb_seasons(tmdb_id) or []
+        return list(cache.get(tmdb_id) or [])
+
+    def _load_movie_collection(
+        self,
+        *,
+        collection_id: int,
+        scan_cache: Dict[str, Dict[Any, Any]],
+        tmdb_budget: Dict[str, Any],
+    ) -> List[Any]:
+        cache = scan_cache.setdefault("movie_collection", {})
+        if collection_id not in cache:
+            self._consume_tmdb_budget(tmdb_budget)
+            cache[collection_id] = (self._tmdb_chain or TmdbChain()).tmdb_collection(collection_id) or []
+        return list(cache.get(collection_id) or [])
 
     def _import_transfer_history(self, *, days: int, reason: str) -> Dict[str, Any]:
         cutoff = datetime.now() - timedelta(days=max(days, 0))
@@ -1383,7 +1776,7 @@ class NextReleaseTracker(_PluginBase):
         return default
 
     def _normalize_cron_expr(self, value: Any) -> str:
-        default = "0 3 * * 1"
+        default = self.DEFAULT_CRON
         text = str(value or default).strip() or default
         try:
             CronTrigger.from_crontab(text)
@@ -1391,6 +1784,49 @@ class NextReleaseTracker(_PluginBase):
             logger.warning(f"[NextReleaseTracker] invalid cron expression ignored: {text}")
             return default
         return text
+
+    def _normalize_tmdb_call_limit(self, value: Any) -> int:
+        return self._normalized_tmdb_call_limit(value)
+
+    @classmethod
+    def _normalized_tmdb_call_limit(cls, value: Any) -> int:
+        raw = coerce_int(value, cls.MAX_TMDB_CALLS_PER_MINUTE_CAP) or cls.MAX_TMDB_CALLS_PER_MINUTE_CAP
+        return min(max(raw, 1), cls.MAX_TMDB_CALLS_PER_MINUTE_CAP)
+
+    @staticmethod
+    def _cron_step_value(field: str) -> Optional[int]:
+        text = str(field or "").strip()
+        match = re.match(r"^\*/(\d+)$", text)
+        if not match:
+            return None
+        step = coerce_int(match.group(1))
+        return step if step and step > 0 else None
+
+    @classmethod
+    def _estimate_cron_period_minutes(cls, expr: str) -> int:
+        fields = str(expr or cls.DEFAULT_CRON).split()
+        if len(fields) != 5:
+            return 7 * 24 * 60
+        minute, hour, day, month, weekday = fields
+        if fields == ["*", "*", "*", "*", "*"]:
+            return 1
+        if cls._cron_step_value(minute) and hour == "*" and day == "*" and month == "*" and weekday == "*":
+            return cls._cron_step_value(minute) or 1
+        if minute != "*" and hour == "*" and day == "*" and month == "*" and weekday == "*":
+            return 60
+        if minute != "*" and cls._cron_step_value(hour) and day == "*" and month == "*" and weekday == "*":
+            return (cls._cron_step_value(hour) or 1) * 60
+        if minute != "*" and hour != "*" and cls._cron_step_value(day) and month == "*" and weekday == "*":
+            return (cls._cron_step_value(day) or 1) * 24 * 60
+        if minute != "*" and hour != "*" and day == "*" and month == "*" and weekday == "*":
+            return 24 * 60
+        if minute != "*" and hour != "*" and day == "*" and month == "*" and weekday != "*":
+            return 7 * 24 * 60
+        if minute != "*" and hour != "*" and day != "*" and month == "*" and weekday == "*":
+            return 31 * 24 * 60
+        if minute != "*" and hour != "*" and day != "*" and month != "*" and weekday == "*":
+            return 366 * 24 * 60
+        return 7 * 24 * 60
 
     def _normalize_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -1404,6 +1840,7 @@ class NextReleaseTracker(_PluginBase):
             "grace_days": max(coerce_int(config.get("grace_days"), 3) or 3, 0),
             "history_days": max(coerce_int(config.get("history_days"), 365) or 365, 0),
             "log_retention": max(coerce_int(config.get("log_retention"), 200) or 200, 20),
+            "max_tmdb_calls_per_minute": self._normalize_tmdb_call_limit(config.get("max_tmdb_calls_per_minute")),
             "tracked_tv_ids": self._serialize_track_selection(self._parse_track_selection(config.get("tracked_tv_ids"))),
             "tracked_movie_ids": self._serialize_track_selection(self._parse_track_selection(config.get("tracked_movie_ids"))),
             "manual_movie_mappings": self._serialize_manual_mapping_text(
@@ -1424,6 +1861,7 @@ class NextReleaseTracker(_PluginBase):
             "grace_days": self._grace_days,
             "history_days": self._history_days,
             "log_retention": self._log_retention,
+            "max_tmdb_calls_per_minute": self._max_tmdb_calls_per_minute,
             "tracked_tv_ids": self._serialize_track_selection(self._selected_tv_ids),
             "tracked_movie_ids": self._serialize_track_selection(self._selected_movie_ids),
             "manual_movie_mappings": self._serialize_manual_mapping_text(current_mappings),
@@ -2100,9 +2538,26 @@ class NextReleaseTracker(_PluginBase):
     def _subscribe_exists(self, *, tmdb_id: int, season: Optional[int] = None) -> bool:
         return SubscribeOper().exists(tmdbid=tmdb_id, season=season)
 
-    def _recognize_media(self, *, tmdb_id: int, mtype: MediaType) -> Optional[MediaInfo]:
+    def _recognize_media(
+        self,
+        *,
+        tmdb_id: int,
+        mtype: MediaType,
+        scan_cache: Optional[Dict[str, Dict[Any, Any]]] = None,
+        tmdb_budget: Optional[Dict[str, Any]] = None,
+    ) -> Optional[MediaInfo]:
+        cache_key = f"{mtype.value}:{tmdb_id}"
+        if scan_cache is not None:
+            media_cache = scan_cache.setdefault("media", {})
+            if cache_key in media_cache:
+                return media_cache[cache_key]
         try:
-            return self.chain.recognize_media(tmdbid=tmdb_id, mtype=mtype, cache=False)
+            if tmdb_budget is not None:
+                self._consume_tmdb_budget(tmdb_budget)
+            media = self.chain.recognize_media(tmdbid=tmdb_id, mtype=mtype, cache=True)
+            if scan_cache is not None:
+                scan_cache.setdefault("media", {})[cache_key] = media
+            return media
         except Exception as exc:
             logger.warning(f"[NextReleaseTracker] media recognition failed for {tmdb_id}: {exc}")
             return None
@@ -2175,6 +2630,23 @@ class NextReleaseTracker(_PluginBase):
     @staticmethod
     def _now() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _now_dt(self) -> datetime:
+        return self._parse_runtime_datetime(self._now()) or datetime.now()
+
+    @staticmethod
+    def _format_runtime_datetime(value: datetime) -> str:
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _parse_runtime_datetime(value: Any) -> Optional[datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
 
     def _build_diagnostic_event_payload(
         self,

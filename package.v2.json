@@ -1,26 +1,27 @@
 {
   "NextReleaseTracker": {
     "name": "追剧助手",
-    "description": "Track only user-selected TV shows and movies, notify once when the next season or sequel appears, then finish tracking.",
+    "description": "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。",
     "labels": "notification,tmdb,tracking,watchlist",
-    "version": "1.1.7",
+    "version": "1.1.8",
     "icon": "nextreleasetracker.png",
-    "author": "Codex",
+    "author": "morningstar-ski",
     "level": 1,
     "release": true,
     "system_version": ">=2.12.0",
     "history": {
-      "v1.1.7": "Renamed the plugin's user-facing display name to 追剧助手 while keeping the stable plugin ID for compatibility.",
-      "v1.1.6": "Clarified advanced manual movie mapping examples with real TMDB movie IDs and explicit movie-name references, so users can understand which numbers to fill in.",
-      "v1.1.5": "Fixed audited backend gaps: invalid cron now falls back safely, notify-off scans keep unresolved releases pending instead of silently dropping them, and collection-based movie removals also clear manual mappings.",
-      "v1.1.4": "Added a real config-page editor for advanced movie manual mappings, and kept that mapping text in sync with runtime changes.",
-      "v1.1.3": "Refined config and status-page copy into simpler user-facing language, while keeping advanced manual ID and mapping controls available.",
-      "v1.1.2": "Added time-sorted TV and movie candidate lists with title filtering and one-click whitelist selection, plus bootstrap seeding from local history for selected entries.",
-      "v1.1.1": "Reworked the config and status UI around explicit whitelist selection, with visible selected lists, clearer tracking state, and direct remove actions.",
-      "v1.1.0": "Switched to explicit watchlists: subscriptions are no longer tracked by default, scans notify once when a new season or sequel appears, and the track is then closed.",
-      "v1.0.2": "Added safe runtime event diagnostics for TV completion handlers, with automatic cleanup and status-page visibility.",
-      "v1.0.1": "TV-only default mode, refined plugin form and status page with action buttons, richer runtime visibility, and host delivery hardening.",
-      "v1.0.0": "Initial delivery with TV next-season tracking, TMDB collection movie sequel tracking, manual management APIs, transfer-history backfill, and status page."
+      "v1.1.8": "改为按设定周期均摊推进扫描，并把 TMDB 调用限制在每分钟最多 5 次；同时明确电影自动续作只基于 TMDB collection，无 collection 时需手动关联。",
+      "v1.1.7": "将插件对外显示名改为追剧助手，同时保持稳定的插件 ID 不变，避免已有安装失效。",
+      "v1.1.6": "把高级电影手动关联示例改成真实可读的 TMDB 电影链，并明确示例里每个编号对应的电影。",
+      "v1.1.5": "修复审查中发现的后端问题：非法 cron 自动回退默认值，notify=false 时保留待处理结果，按 collection 删除电影追踪时也会清理手动映射。",
+      "v1.1.4": "补上可直接编辑的电影手动关联配置框，并让配置文本与运行态映射保持同步。",
+      "v1.1.3": "把配置页和状态页文案改成更白话的表达，同时保留高级 TMDB 编号和手动关联能力。",
+      "v1.1.2": "加入按时间排序的剧集/电影候选列表、标题过滤和一键加入名单，并支持从本地历史为已选条目做初始建档。",
+      "v1.1.1": "围绕显式追更名单重做配置与状态界面，显示已选条目、追踪状态，并提供直接移除操作。",
+      "v1.1.0": "切换为显式追更名单模式：不再默认追踪全部订阅，命中新一季或下一部后只提醒一次并结束本条追踪。",
+      "v1.0.2": "加入安全的运行态事件诊断能力，便于排查剧集完成事件，同时支持自动清理测试样本。",
+      "v1.0.1": "以剧集追踪为默认模式，补充操作按钮、状态页和更多运行态可见性，并加固宿主兼容细节。",
+      "v1.0.0": "首版交付：支持剧集新季追踪、基于 TMDB collection 的电影续作追踪、手动管理 API、入库历史回填和状态页。"
     }
   }
 }

@@ -476,14 +476,18 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("清空白名单", form_text)
         self.assertIn("电影追更名单", form_text)
         self.assertIn("插件会继续关注这部剧后面的新一季", form_text)
+        self.assertIn("均摊周期 Cron", form_text)
+        self.assertIn("每分钟最多 5 次", form_text)
         self.assertIn("电影手动关联（高级）", form_text)
         self.assertIn("603=604,605", form_text)
         self.assertIn("TMDB 编号", form_text)
         self.assertIn("黑客帝国", form_text)
+        self.assertIn("TMDB collection", form_text)
         self.assertEqual("", model["tv_candidate_id"])
         self.assertEqual("", model["movie_remove_id"])
         self.assertEqual("", model["tv_search_text"])
         self.assertEqual("", model["movie_search_text"])
+        self.assertEqual(5, model["max_tmdb_calls_per_minute"])
 
     def test_candidate_lookup_dedupes_and_sorts_by_recent_time(self):
         plugin_module = load_plugin_module()
@@ -663,6 +667,109 @@ class PluginPageTests(unittest.TestCase):
 
         self.assertEqual("0 3 * * 1", plugin._cron)
         self.assertEqual("0 3 * * 1", plugin._config["cron"])
+
+    def test_tmdb_minute_limit_is_capped_at_five(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin.init_plugin({"enabled": True, "max_tmdb_calls_per_minute": 99})
+
+        self.assertEqual(5, plugin._max_tmdb_calls_per_minute)
+        self.assertEqual(5, plugin._config["max_tmdb_calls_per_minute"])
+
+    def test_get_service_uses_minute_tick_for_paced_scans(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin.init_plugin({"enabled": True, "enable_tv": True, "cron": "0 3 * * 1"})
+        services = plugin.get_service()
+
+        self.assertEqual("scan_tick", services[0]["id"])
+        self.assertEqual("* * * * *", services[0]["trigger"])
+        self.assertEqual("cron_tick", services[0]["func_kwargs"]["reason"])
+
+    def test_cron_tick_spreads_weekly_scan_across_cycle(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": False,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "100\n101\n102\n103\n104\n105\n106",
+                "cron": "0 3 * * 1",
+            }
+        )
+        store = plugin._ensure_state_store()
+        for tmdb_id in range(100, 107):
+            store.acknowledge_tv_completion(
+                tmdb_id=tmdb_id,
+                title=f"Show {tmdb_id}",
+                year="2020",
+                season=1,
+                source="manual",
+            )
+
+        calls = []
+        plugin._tmdb_chain = types.SimpleNamespace(
+            tmdb_seasons=lambda tmdb_id: calls.append(tmdb_id) or []
+        )
+        plugin._now = lambda: "2026-06-01 03:00:00"
+
+        first = plugin._run_rescan(scope="tv", reason="cron_tick", notify=False)
+
+        self.assertTrue(first["success"])
+        self.assertEqual(1, first["planned_tracks"])
+        self.assertEqual(1, first["scanned_tv"])
+        self.assertEqual(6, first["remaining_tracks"])
+        self.assertEqual([100], calls)
+
+        plugin._now = lambda: "2026-06-02 03:00:00"
+        second = plugin._run_rescan(scope="tv", reason="cron_tick", notify=False)
+
+        self.assertTrue(second["success"])
+        self.assertEqual(1, second["planned_tracks"])
+        self.assertEqual(1, second["scanned_tv"])
+        self.assertEqual(5, second["remaining_tracks"])
+        self.assertEqual([100, 101], calls)
+
+    def test_manual_rescan_stops_after_five_tmdb_calls_per_minute(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": False,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "200\n201\n202\n203\n204\n205",
+            }
+        )
+        store = plugin._ensure_state_store()
+        for tmdb_id in range(200, 206):
+            store.acknowledge_tv_completion(
+                tmdb_id=tmdb_id,
+                title=f"Show {tmdb_id}",
+                year="2020",
+                season=1,
+                source="manual",
+            )
+
+        calls = []
+        plugin._tmdb_chain = types.SimpleNamespace(
+            tmdb_seasons=lambda tmdb_id: calls.append(tmdb_id) or []
+        )
+        plugin._now = lambda: "2026-06-03 10:00:00"
+
+        summary = plugin._run_rescan(scope="tv", reason="api", notify=False)
+
+        self.assertTrue(summary["success"])
+        self.assertTrue(summary["budget_exhausted"])
+        self.assertEqual(5, summary["tmdb_calls_used"])
+        self.assertEqual(5, summary["scanned_tv"])
+        self.assertEqual(1, summary["remaining_tracks"])
+        self.assertEqual([200, 201, 202, 203, 204], calls)
 
     def test_tv_rescan_without_notify_keeps_track_and_marks_pending(self):
         plugin_module = load_plugin_module()
