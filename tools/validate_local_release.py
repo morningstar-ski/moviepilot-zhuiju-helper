@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from build_release_zip import build_release_zip
+
 
 REQUIRED_PLUGIN_METHODS = {
     "init_plugin",
@@ -101,13 +103,19 @@ def check_metadata_sync(plugin_meta: dict, plugin_version: str) -> None:
 def check_repo_layout(workspace: Path) -> None:
     required = [
         workspace / "package.v2.json",
-        workspace / "icons/nextreleasetracker.png",
         workspace / "plugins.v2/nextreleasetracker/__init__.py",
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise SystemExit(f"missing required files: {missing}")
     print("[ok] repo layout")
+
+
+def check_release_bundle(workspace: Path, output_dir: Path) -> None:
+    zip_path, names, digest = build_release_zip(workspace, output_dir)
+    print(f"[ok] release zip built: {zip_path}")
+    print(f"[ok] release zip entries: {len(names)}")
+    print(f"[ok] release zip sha256: {digest}")
 
 
 def check_host_contract(workspace: Path, moviepilot_source: Path) -> None:
@@ -151,16 +159,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
     parser.add_argument("--moviepilot-source", type=Path, default=Path(r"C:\tmp\MoviePilot"))
+    parser.add_argument("--release-output-dir", type=Path, default=Path("/tmp") / "nextreleasetracker-release")
     args = parser.parse_args()
 
     workspace = args.workspace.resolve()
     moviepilot_source = args.moviepilot_source.resolve()
+    release_output_dir = args.release_output_dir.resolve()
 
     check_repo_layout(workspace)
     compile_python_sources(workspace)
     plugin_meta = load_package_metadata(workspace)
     _, _, plugin_version = parse_plugin_class(workspace)
     check_metadata_sync(plugin_meta, plugin_version)
+    check_release_bundle(workspace, release_output_dir)
     check_host_contract(workspace, moviepilot_source)
     run_unit_tests(workspace)
     print("[ok] local release validation passed")

@@ -61,6 +61,13 @@ MoviePilot V2 插件。
 
 如果通过 GitHub 仓库给 MoviePilot 安装，还需要提供符合规则的 GitHub Release 资产包。
 
+Release 资产规则：
+
+- tag 使用 `NextReleaseTracker_v{version}`
+- 资产文件名使用 `nextreleasetracker_v{version}.zip`
+- ZIP 根目录直接放插件运行文件，例如 `__init__.py`、`logic.py`、`state.py`、`nextreleasetracker.png`
+- 不要把 `plugins.v2/`、`icons/`、`package.v2.json` 整个打进 ZIP
+
 ### 方式 2：作为本地插件仓库安装
 
 1. 将本仓库放到本机某个目录
@@ -114,9 +121,15 @@ MoviePilot V2 插件。
 
 ```powershell
 & 'C:\Users\yang\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' `
+  tools\build_release_zip.py `
+  --workspace 'C:\Users\yang\Desktop\影视追剧助手' `
+  --output-dir 'C:\tmp\nextreleasetracker-release'
+
+& 'C:\Users\yang\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' `
   tools\validate_local_release.py `
   --workspace 'C:\Users\yang\Desktop\影视追剧助手' `
-  --moviepilot-source 'C:\tmp\MoviePilot'
+  --moviepilot-source 'C:\tmp\MoviePilot' `
+  --release-output-dir 'C:\tmp\nextreleasetracker-release'
 ```
 
 校验内容：
@@ -125,11 +138,13 @@ MoviePilot V2 插件。
 - 单元测试
 - `package.v2.json` 元数据
 - `plugin_version` 与发布元数据一致
+- Release ZIP 文件名与条目结构
 - 与本地 MoviePilot V2 插件装载约定兼容
 
 ## 发布前检查
 
 1. `package.v2.json` 版本号与 `plugin_version` 一致
 2. `python -m unittest tests.test_nextreleasetracker_logic` 全部通过
-3. `tools/validate_local_release.py` 全部通过
-4. 仓库里不包含临时日志、远端调试残留和 `__pycache__`
+3. `tools/build_release_zip.py` 产出的 ZIP 文件名和根目录条目正确
+4. `tools/validate_local_release.py` 全部通过
+5. 仓库里不包含临时日志、远端调试残留和 `__pycache__`
