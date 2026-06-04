@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.8"
+    plugin_version = "1.1.9"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -123,6 +123,9 @@ class NextReleaseTracker(_PluginBase):
         self._tmdb_chain = TmdbChain()
         self._subscribe_chain = SubscribeChain()
         self._media_server_chain = MediaServerChain()
+        recovered_missing_config = False
+        if not config:
+            recovered_missing_config = self._recover_missing_config_from_state()
         if "manual_movie_mappings" in config:
             self._sync_manual_mappings_from_text(normalized_config["manual_movie_mappings"])
         else:
@@ -131,7 +134,9 @@ class NextReleaseTracker(_PluginBase):
             )
         self._sync_selected_track_state()
         self._bootstrap_selected_tracks_from_local_catalog()
-        if config and self._config_needs_cleanup(config, normalized_config):
+        if recovered_missing_config:
+            self.update_config(self._current_config_snapshot())
+        elif config and self._config_needs_cleanup(config, normalized_config):
             self.update_config(normalized_config)
 
         if self._backfill_on_enable and self._enabled and not self._state_store.has_tracks():
@@ -1874,6 +1879,26 @@ class NextReleaseTracker(_PluginBase):
 
     def _save_current_config(self) -> None:
         self.update_config(self._current_config_snapshot())
+
+    def _recover_missing_config_from_state(self) -> bool:
+        store = self._ensure_state_store()
+        recovered_tv_ids = normalize_tmdb_id_list(
+            coerce_int(track.get("tmdb_id"))
+            for track in store.get_tv_tracks().values()
+        )
+        recovered_movie_ids = normalize_tmdb_id_list(
+            coerce_int(track.get("anchor_tmdb_id"))
+            for track in store.get_movie_tracks().values()
+        )
+        has_manual_mappings = bool(store.get_manual_mappings())
+
+        if recovered_tv_ids:
+            self._selected_tv_ids = recovered_tv_ids
+        if recovered_movie_ids:
+            self._selected_movie_ids = recovered_movie_ids
+            self._enable_movie = True
+
+        return bool(recovered_tv_ids or recovered_movie_ids or has_manual_mappings)
 
     def _sync_manual_mappings_from_text(self, value: Any) -> None:
         store = self._ensure_state_store()

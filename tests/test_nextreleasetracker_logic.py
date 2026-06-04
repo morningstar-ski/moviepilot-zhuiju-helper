@@ -318,6 +318,66 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual([], plugin._selected_tv_ids)
         self.assertEqual([], plugin._selected_movie_ids)
 
+    def test_init_plugin_recovers_selected_ids_from_state_when_config_missing(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        movie_track_key = logic.build_movie_track_key(None, 550)
+        plugin._data[state.TrackerStateStore.KEY_TRACKED_TV] = {
+            logic.build_tv_track_key(60625): {
+                "tmdb_id": 60625,
+                "title": "Rick and Morty",
+                "year": "2013",
+                "latest_season": 1,
+                "pending_seasons": [],
+                "source": "manual",
+                "added_at": "2026-06-04 12:00:00",
+            }
+        }
+        plugin._data[state.TrackerStateStore.KEY_TRACKED_MOVIE] = {
+            movie_track_key: {
+                "track_key": movie_track_key,
+                "anchor_tmdb_id": 550,
+                "title": "Fight Club",
+                "year": "1999",
+                "collection_id": None,
+                "known_tmdb_ids": [550],
+                "pending_tmdb_ids": [],
+                "source": "manual",
+                "added_at": "2026-06-04 12:00:00",
+            }
+        }
+
+        plugin.init_plugin({})
+
+        store = plugin._ensure_state_store()
+        self.assertEqual([60625], plugin._selected_tv_ids)
+        self.assertEqual([550], plugin._selected_movie_ids)
+        self.assertTrue(plugin._enable_movie)
+        self.assertIn("60625", plugin._config["tracked_tv_ids"])
+        self.assertIn("550", plugin._config["tracked_movie_ids"])
+        self.assertIn("60625", store.get_tv_tracks())
+        self.assertIn(movie_track_key, store.get_movie_tracks())
+
+    def test_init_plugin_with_explicit_empty_selection_still_cleans_stale_tracks(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin._data[state.TrackerStateStore.KEY_TRACKED_TV] = {
+            logic.build_tv_track_key(60625): {
+                "tmdb_id": 60625,
+                "title": "Rick and Morty",
+                "year": "2013",
+                "latest_season": 1,
+                "pending_seasons": [],
+                "source": "manual",
+                "added_at": "2026-06-04 12:00:00",
+            }
+        }
+
+        plugin.init_plugin({"tracked_tv_ids": "", "tracked_movie_ids": "", "manual_movie_mappings": ""})
+
+        self.assertEqual([], plugin._selected_tv_ids)
+        self.assertEqual({}, plugin._ensure_state_store().get_tv_tracks())
+
     def test_init_plugin_sanitizes_form_only_fields(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
