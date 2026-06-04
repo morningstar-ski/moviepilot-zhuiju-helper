@@ -12,6 +12,8 @@ except ImportError:
 
 
 class TrackerStateStore:
+    KEY_SELECTED_TV_IDS = "selected_tv_ids"
+    KEY_SELECTED_MOVIE_IDS = "selected_movie_ids"
     KEY_TRACKED_TV = "tracked_tv"
     KEY_TRACKED_MOVIE = "tracked_movie"
     KEY_ACTION_LOG = "action_log"
@@ -47,15 +49,41 @@ class TrackerStateStore:
         self._save_fn(key, deepcopy(value))
         return value
 
+    def _exists(self, key: str) -> bool:
+        return self._load_fn(key) is not None
+
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             return {
+                self.KEY_SELECTED_TV_IDS: self.get_selected_tv_ids(),
+                self.KEY_SELECTED_MOVIE_IDS: self.get_selected_movie_ids(),
                 self.KEY_TRACKED_TV: self.get_tv_tracks(),
                 self.KEY_TRACKED_MOVIE: self.get_movie_tracks(),
                 self.KEY_ACTION_LOG: self.get_action_log(),
                 self.KEY_RUNTIME_STATE: self.get_runtime_state(),
                 self.KEY_MANUAL_MAPPINGS: self.get_manual_mappings(),
             }
+
+    def has_selected_track_ids(self) -> bool:
+        return self._exists(self.KEY_SELECTED_TV_IDS) or self._exists(self.KEY_SELECTED_MOVIE_IDS)
+
+    def get_selected_tv_ids(self) -> list[int]:
+        return normalize_tmdb_id_list(self._load(self.KEY_SELECTED_TV_IDS, []))
+
+    def get_selected_movie_ids(self) -> list[int]:
+        return normalize_tmdb_id_list(self._load(self.KEY_SELECTED_MOVIE_IDS, []))
+
+    def set_selected_tv_ids(self, tmdb_ids: Optional[list[int]]) -> list[int]:
+        with self._lock:
+            normalized = normalize_tmdb_id_list(tmdb_ids)
+            self._save(self.KEY_SELECTED_TV_IDS, normalized)
+            return list(normalized)
+
+    def set_selected_movie_ids(self, tmdb_ids: Optional[list[int]]) -> list[int]:
+        with self._lock:
+            normalized = normalize_tmdb_id_list(tmdb_ids)
+            self._save(self.KEY_SELECTED_MOVIE_IDS, normalized)
+            return list(normalized)
 
     def has_tracks(self) -> bool:
         return bool(self.get_tv_tracks() or self.get_movie_tracks())

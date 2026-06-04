@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.9"
+    plugin_version = "1.1.10"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -111,8 +111,8 @@ class NextReleaseTracker(_PluginBase):
         self._history_days = normalized_config["history_days"]
         self._log_retention = normalized_config["log_retention"]
         self._max_tmdb_calls_per_minute = normalized_config["max_tmdb_calls_per_minute"]
-        self._selected_tv_ids = self._parse_track_selection(normalized_config["tracked_tv_ids"])
-        self._selected_movie_ids = self._parse_track_selection(normalized_config["tracked_movie_ids"])
+        self._selected_tv_ids = []
+        self._selected_movie_ids = []
 
         self._state_store = TrackerStateStore(
             self.get_data,
@@ -123,21 +123,22 @@ class NextReleaseTracker(_PluginBase):
         self._tmdb_chain = TmdbChain()
         self._subscribe_chain = SubscribeChain()
         self._media_server_chain = MediaServerChain()
-        recovered_missing_config = False
-        if not config:
-            recovered_missing_config = self._recover_missing_config_from_state()
+        self._restore_selected_track_state(config, normalized_config)
+        if self._selected_movie_ids and "enable_movie" not in config:
+            self._enable_movie = True
+            normalized_config["enable_movie"] = True
         if "manual_movie_mappings" in config:
             self._sync_manual_mappings_from_text(normalized_config["manual_movie_mappings"])
         else:
             normalized_config["manual_movie_mappings"] = self._serialize_manual_mapping_text(
                 self._state_store.get_manual_mappings()
             )
+        normalized_config["tracked_tv_ids"] = self._serialize_track_selection(self._selected_tv_ids)
+        normalized_config["tracked_movie_ids"] = self._serialize_track_selection(self._selected_movie_ids)
         self._sync_selected_track_state()
         self._bootstrap_selected_tracks_from_local_catalog()
-        if recovered_missing_config:
+        if not config or self._config_needs_cleanup(config, normalized_config):
             self.update_config(self._current_config_snapshot())
-        elif config and self._config_needs_cleanup(config, normalized_config):
-            self.update_config(normalized_config)
 
         if self._backfill_on_enable and self._enabled and not self._state_store.has_tracks():
             runtime = self._state_store.get_runtime_state()
@@ -1878,27 +1879,41 @@ class NextReleaseTracker(_PluginBase):
         return any(config.get(key) != value for key, value in normalized_config.items())
 
     def _save_current_config(self) -> None:
+        self._persist_selected_track_state()
         self.update_config(self._current_config_snapshot())
 
-    def _recover_missing_config_from_state(self) -> bool:
+    def _restore_selected_track_state(self, config: Dict[str, Any], normalized_config: Dict[str, Any]) -> None:
         store = self._ensure_state_store()
-        recovered_tv_ids = normalize_tmdb_id_list(
-            coerce_int(track.get("tmdb_id"))
-            for track in store.get_tv_tracks().values()
-        )
-        recovered_movie_ids = normalize_tmdb_id_list(
-            coerce_int(track.get("anchor_tmdb_id"))
-            for track in store.get_movie_tracks().values()
-        )
-        has_manual_mappings = bool(store.get_manual_mappings())
+        if store.has_selected_track_ids():
+            self._selected_tv_ids = store.get_selected_tv_ids()
+            self._selected_movie_ids = store.get_selected_movie_ids()
+            return
 
-        if recovered_tv_ids:
-            self._selected_tv_ids = recovered_tv_ids
-        if recovered_movie_ids:
-            self._selected_movie_ids = recovered_movie_ids
-            self._enable_movie = True
+        config_has_selection_keys = "tracked_tv_ids" in config or "tracked_movie_ids" in config
+        if config_has_selection_keys:
+            self._selected_tv_ids = self._parse_track_selection(normalized_config["tracked_tv_ids"])
+            self._selected_movie_ids = self._parse_track_selection(normalized_config["tracked_movie_ids"])
+        else:
+            self._selected_tv_ids, self._selected_movie_ids = self._recover_selected_track_ids_from_tracks()
+        self._persist_selected_track_state()
 
-        return bool(recovered_tv_ids or recovered_movie_ids or has_manual_mappings)
+    def _recover_selected_track_ids_from_tracks(self) -> Tuple[List[int], List[int]]:
+        store = self._ensure_state_store()
+        return (
+            normalize_tmdb_id_list(
+                coerce_int(track.get("tmdb_id"))
+                for track in store.get_tv_tracks().values()
+            ),
+            normalize_tmdb_id_list(
+                coerce_int(track.get("anchor_tmdb_id"))
+                for track in store.get_movie_tracks().values()
+            ),
+        )
+
+    def _persist_selected_track_state(self) -> None:
+        store = self._ensure_state_store()
+        self._selected_tv_ids = store.set_selected_tv_ids(self._selected_tv_ids)
+        self._selected_movie_ids = store.set_selected_movie_ids(self._selected_movie_ids)
 
     def _sync_manual_mappings_from_text(self, value: Any) -> None:
         store = self._ensure_state_store()

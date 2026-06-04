@@ -355,8 +355,52 @@ class PluginPageTests(unittest.TestCase):
         self.assertTrue(plugin._enable_movie)
         self.assertIn("60625", plugin._config["tracked_tv_ids"])
         self.assertIn("550", plugin._config["tracked_movie_ids"])
+        self.assertEqual([60625], store.get_selected_tv_ids())
+        self.assertEqual([550], store.get_selected_movie_ids())
         self.assertIn("60625", store.get_tv_tracks())
         self.assertIn(movie_track_key, store.get_movie_tracks())
+
+    def test_init_plugin_migrates_config_selection_into_state_store(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_movie": True,
+                "tracked_tv_ids": "60625",
+                "tracked_movie_ids": "550",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        self.assertEqual([60625], store.get_selected_tv_ids())
+        self.assertEqual([550], store.get_selected_movie_ids())
+        self.assertEqual("60625", plugin._config["tracked_tv_ids"])
+        self.assertEqual("550", plugin._config["tracked_movie_ids"])
+
+    def test_init_plugin_prefers_state_selection_over_stale_config_mirror(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_TV_IDS] = [60625]
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_MOVIE_IDS] = [550]
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_movie": True,
+                "tracked_tv_ids": "77777",
+                "tracked_movie_ids": "603",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        self.assertEqual([60625], plugin._selected_tv_ids)
+        self.assertEqual([550], plugin._selected_movie_ids)
+        self.assertEqual([60625], store.get_selected_tv_ids())
+        self.assertEqual([550], store.get_selected_movie_ids())
+        self.assertEqual("60625", plugin._config["tracked_tv_ids"])
+        self.assertEqual("550", plugin._config["tracked_movie_ids"])
 
     def test_init_plugin_with_explicit_empty_selection_still_cleans_stale_tracks(self):
         plugin_module = load_plugin_module()
@@ -376,6 +420,7 @@ class PluginPageTests(unittest.TestCase):
         plugin.init_plugin({"tracked_tv_ids": "", "tracked_movie_ids": "", "manual_movie_mappings": ""})
 
         self.assertEqual([], plugin._selected_tv_ids)
+        self.assertEqual([], plugin._ensure_state_store().get_selected_tv_ids())
         self.assertEqual({}, plugin._ensure_state_store().get_tv_tracks())
 
     def test_init_plugin_sanitizes_form_only_fields(self):
@@ -435,6 +480,7 @@ class PluginPageTests(unittest.TestCase):
         self.assertTrue(response["success"])
         self.assertEqual([60625], plugin._selected_tv_ids)
         self.assertEqual("60625", plugin._config["tracked_tv_ids"])
+        self.assertEqual([60625], plugin._ensure_state_store().get_selected_tv_ids())
 
     def test_selected_tv_track_notifies_and_clears_after_detection(self):
         plugin_module = load_plugin_module()
@@ -473,6 +519,7 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual(1, summary["tracks_completed"])
         self.assertEqual({}, store.get_tv_tracks())
         self.assertEqual([], plugin._selected_tv_ids)
+        self.assertEqual([], store.get_selected_tv_ids())
         self.assertEqual("", plugin._config["tracked_tv_ids"])
         self.assertIn("新季 S02", plugin._last_message["text"])
         self.assertIn("已结束本条追踪", plugin._last_message["text"])
@@ -963,6 +1010,7 @@ class PluginPageTests(unittest.TestCase):
 
         self.assertTrue(response["success"])
         self.assertIsNone(store.get_manual_mapping(603))
+        self.assertEqual([], store.get_selected_movie_ids())
         self.assertEqual("", plugin._config["manual_movie_mappings"])
 
     def test_manual_movie_mapping_remove_api_removes_config_snapshot(self):
