@@ -997,6 +997,28 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("已追到 S02", form_text)
         self.assertIn("剧集编号（已加入）", form_text)
         self.assertNotIn("剧集已追季数（每行一条）", form_text)
+    def test_form_tv_table_pending_status_is_bound_to_manual_tv_seasons_model(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "247718",
+            }
+        )
+
+        form, _ = plugin.get_form()
+        nodes = list(iter_component_nodes(form))
+        self.assertTrue(
+            any(
+                node.get("component") == "td"
+                and node.get("text") == "待保存，保存后生效"
+                and "manual_tv_seasons" in str((node.get("props") or {}).get("show", ""))
+                for node in nodes
+            )
+        )
+
     def test_form_candidates_ignore_tmdb_discover_noise(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()

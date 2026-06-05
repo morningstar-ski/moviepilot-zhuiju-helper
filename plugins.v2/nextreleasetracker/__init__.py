@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.20"
+    plugin_version = "1.1.21"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -307,6 +307,7 @@ class NextReleaseTracker(_PluginBase):
                             track_lookup=tv_tracks,
                             is_movie=False,
                             candidates=tv_candidates,
+                            manual_tv_season_model="manual_tv_seasons",
                         ),
                         candidates=tv_candidates,
                         add_button_expr=self._selection_add_tv_expr(
@@ -2725,6 +2726,7 @@ class NextReleaseTracker(_PluginBase):
         track_lookup: Dict[str, Any],
         is_movie: bool,
         candidates: List[Dict[str, Any]],
+        manual_tv_season_model: Optional[str] = None,
     ) -> dict:
         headers = ["名称", "TMDB编号", "状态"] if is_movie else ["名称", "TMDB编号", "已追季数", "状态"]
         candidate_lookup = {
@@ -2778,16 +2780,58 @@ class NextReleaseTracker(_PluginBase):
                 else:
                     status = "请设置已追季数"
 
+            row_content = [
+                self._table_cell(title),
+                self._table_cell(tmdb_id),
+            ]
+            if is_movie:
+                row_content.append(self._table_cell(status))
+            elif latest_season:
+                row_content.extend(
+                    [
+                        self._table_cell(f"S{display_season:02d}" if display_season > 0 else "-"),
+                        self._table_cell(status),
+                    ]
+                )
+            else:
+                pending_expr = self._selection_manual_tv_season_exists_expr(
+                    manual_tv_season_model or "manual_tv_seasons",
+                    tmdb_id,
+                )
+                empty_expr = self._selection_manual_tv_season_missing_expr(
+                    manual_tv_season_model or "manual_tv_seasons",
+                    tmdb_id,
+                )
+                row_content.extend(
+                    [
+                        {
+                            "component": "td",
+                            "props": {"show": pending_expr},
+                            "text": "待保存",
+                        },
+                        {
+                            "component": "td",
+                            "props": {"show": empty_expr},
+                            "text": f"S{display_season:02d}" if display_season > 0 else "-",
+                        },
+                        {
+                            "component": "td",
+                            "props": {"show": pending_expr},
+                            "text": "待保存，保存后生效",
+                        },
+                        {
+                            "component": "td",
+                            "props": {"show": empty_expr},
+                            "text": status,
+                        },
+                    ]
+                )
+
             body_rows.append(
                 {
                     "component": "tr",
                     "props": {"show": self._selection_contains_expr(model_key, tmdb_id)},
-                    "content": [
-                        self._table_cell(title),
-                        self._table_cell(tmdb_id),
-                        *([] if is_movie else [self._table_cell(f"S{display_season:02d}" if display_season > 0 else "-")]),
-                        self._table_cell(status),
-                    ],
+                    "content": row_content,
                 }
             )
 
@@ -2863,6 +2907,26 @@ class NextReleaseTracker(_PluginBase):
     def _selection_contains_expr(cls, model_key: str, tmdb_id: int) -> str:
         parsed = cls._selection_model_parse_js(model_key)
         return "{{ (() => { " f"const ids = {parsed}; " f"return ids.includes({int(tmdb_id)}); " "})() }}"
+
+    @classmethod
+    def _selection_manual_tv_season_exists_expr(cls, manual_tv_season_model: str, tmdb_id: int) -> str:
+        manual_seasons = cls._manual_tv_season_map_expr(manual_tv_season_model)
+        return (
+            "{{ (() => { "
+            f"const mappings = {manual_seasons}; "
+            f"return Number(mappings[{int(tmdb_id)}] || 0) > 0; "
+            "})() }}"
+        )
+
+    @classmethod
+    def _selection_manual_tv_season_missing_expr(cls, manual_tv_season_model: str, tmdb_id: int) -> str:
+        manual_seasons = cls._manual_tv_season_map_expr(manual_tv_season_model)
+        return (
+            "{{ (() => { "
+            f"const mappings = {manual_seasons}; "
+            f"return Number(mappings[{int(tmdb_id)}] || 0) <= 0; "
+            "})() }}"
+        )
 
     @classmethod
     def _selection_add_expr(cls, model_key: str, add_model: str) -> str:
