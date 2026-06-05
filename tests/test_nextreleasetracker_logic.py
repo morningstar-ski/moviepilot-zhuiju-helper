@@ -480,7 +480,7 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("60625", store.get_tv_tracks())
         self.assertIn(movie_track_key, store.get_movie_tracks())
 
-    def test_init_plugin_explicit_empty_selection_keeps_existing_state_selection(self):
+    def test_init_plugin_explicit_empty_selection_clears_existing_state_selection(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
         plugin._data[state.TrackerStateStore.KEY_SELECTED_TV_IDS] = [60625]
@@ -496,12 +496,32 @@ class PluginPageTests(unittest.TestCase):
         )
 
         store = plugin._ensure_state_store()
-        self.assertEqual([60625], plugin._selected_tv_ids)
+        self.assertEqual([], plugin._selected_tv_ids)
+        self.assertEqual([], plugin._selected_movie_ids)
+        self.assertEqual([], store.get_selected_tv_ids())
+        self.assertEqual([], store.get_selected_movie_ids())
+        self.assertEqual("", plugin._config["tracked_tv_ids"])
+        self.assertEqual("", plugin._config["tracked_movie_ids"])
+
+    def test_init_plugin_explicit_empty_tv_selection_does_not_override_movie_state(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_TV_IDS] = [60625]
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_MOVIE_IDS] = [550]
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_movie": True,
+                "tracked_tv_ids": "",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        self.assertEqual([], plugin._selected_tv_ids)
         self.assertEqual([550], plugin._selected_movie_ids)
-        self.assertEqual([60625], store.get_selected_tv_ids())
+        self.assertEqual([], store.get_selected_tv_ids())
         self.assertEqual([550], store.get_selected_movie_ids())
-        self.assertEqual("60625", plugin._config["tracked_tv_ids"])
-        self.assertEqual("550", plugin._config["tracked_movie_ids"])
 
     def test_init_plugin_with_explicit_empty_selection_still_cleans_stale_tracks(self):
         plugin_module = load_plugin_module()
@@ -881,7 +901,13 @@ class PluginPageTests(unittest.TestCase):
                 for node in nodes
             )
         )
-        self.assertFalse(any("{{ (() => {" in str(node.get("text", "")) for node in nodes))
+        self.assertFalse(
+            any(
+                "{{ (() => {" in str(node.get("text", ""))
+                and node.get("component") != "span"
+                for node in nodes
+            )
+        )
         self.assertGreater(
             form_text.index("\u5f53\u524d\u5df2\u52a0\u5165\u7684\u5267\u96c6"),
             form_text.index("\u5267\u96c6\u5019\u9009\u540d\u5355"),
@@ -910,6 +936,45 @@ class PluginPageTests(unittest.TestCase):
         self.assertNotIn("\u52a0\u5165\u540e\uff0c\u63d2\u4ef6\u4f1a\u7ee7\u7eed\u5173\u6ce8\u8fd9\u90e8\u5267\u540e\u9762\u7684\u65b0\u4e00\u5b63", form_text)
         self.assertIn("tv_candidate_search_text", form_text)
         self.assertNotIn('\"model\": \"candidate_search_text\"', form_text)
+
+    def test_form_exposes_manual_tv_season_controls(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin.init_plugin({"enabled": True, "enable_tv": True, "enable_movie": False})
+
+        form, defaults = plugin.get_form()
+        form_text = repr(form)
+
+        self.assertIn("\u5df2\u8ffd\u5230\u7b2c\u51e0\u5b63", form_text)
+        self.assertIn("\u5267\u96c6\u5df2\u8ffd\u5b63\u6570\uff08\u6bcf\u884c\u4e00\u6761\uff09", form_text)
+        self.assertIn("tv_manual_season", form_text)
+        self.assertIn("manual_tv_seasons", form_text)
+        self.assertIn("\u5f53\u524d\u7f16\u8f91\u4e2d\u7684\u5267\u96c6\u540d\u5355", form_text)
+        self.assertEqual("", defaults["manual_tv_seasons"])
+        self.assertEqual("", defaults["tv_manual_season"])
+
+    def test_form_tv_live_table_status_uses_manual_tv_season_model(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "247718",
+            }
+        )
+
+        form, _ = plugin.get_form()
+        nodes = list(iter_component_nodes(form))
+        self.assertTrue(
+            any(
+                node.get("component") == "span"
+                and "manual_tv_seasons" in str(node.get("text", ""))
+                and "String(season).padStart(2, '0')" in str(node.get("text", ""))
+                for node in nodes
+            )
+        )
     def test_form_candidates_ignore_tmdb_discover_noise(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
@@ -1019,6 +1084,62 @@ class PluginPageTests(unittest.TestCase):
         store = plugin._ensure_state_store()
         self.assertEqual([60625], store.get_selected_tv_ids())
         self.assertEqual({}, store.get_tv_tracks())
+
+    def test_manual_tv_baseline_bootstraps_selected_track_without_local_history(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin_module.TransferHistoryOper = lambda: types.SimpleNamespace(list_by_date=lambda _cutoff: [])
+        plugin_module.SubscribeOper = lambda: types.SimpleNamespace(list=lambda state=None: [])
+        plugin._tmdb_discover_candidates = lambda media_type: []
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "247718",
+                "manual_tv_seasons": "247718=2",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        tv_track = store.get_tv_tracks()["247718"]
+
+        self.assertEqual(2, tv_track["latest_season"])
+        self.assertEqual("TMDB-247718", tv_track["title"])
+        self.assertEqual("247718=2", plugin._current_config_snapshot()["manual_tv_seasons"])
+
+    def test_manual_movie_selection_bootstraps_track_without_local_history(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin_module.TransferHistoryOper = lambda: types.SimpleNamespace(list_by_date=lambda _cutoff: [])
+        plugin_module.SubscribeOper = lambda: types.SimpleNamespace(list=lambda state=None: [])
+        plugin._tmdb_discover_candidates = lambda media_type: []
+        plugin.chain = types.SimpleNamespace(
+            recognize_media=lambda **kwargs: types.SimpleNamespace(
+                title="Interstellar",
+                year="2014",
+                collection_id=None,
+            )
+        )
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": False,
+                "enable_movie": True,
+                "tracked_movie_ids": "157336",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        movie_track = store.get_movie_tracks()["movie:157336"]
+
+        self.assertEqual(157336, movie_track["anchor_tmdb_id"])
+        self.assertEqual([157336], movie_track["known_tmdb_ids"])
+        self.assertEqual("Interstellar", movie_track["title"])
+        self.assertEqual("2014", movie_track["year"])
 
     def test_manual_movie_mapping_can_be_edited_from_config_and_syncs_back(self):
         plugin_module = load_plugin_module()

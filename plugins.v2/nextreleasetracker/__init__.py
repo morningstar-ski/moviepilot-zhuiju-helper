@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.17"
+    plugin_version = "1.1.18"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -75,6 +75,7 @@ class NextReleaseTracker(_PluginBase):
         "max_tmdb_calls_per_minute",
         "tracked_tv_ids",
         "tracked_movie_ids",
+        "manual_tv_seasons",
         "manual_movie_mappings",
     )
 
@@ -91,6 +92,7 @@ class NextReleaseTracker(_PluginBase):
     _max_tmdb_calls_per_minute = MAX_TMDB_CALLS_PER_MINUTE_CAP
     _selected_tv_ids: List[int] = []
     _selected_movie_ids: List[int] = []
+    _manual_tv_seasons: Dict[int, int] = {}
 
     _state_store: Optional[TrackerStateStore] = None
     _tmdb_chain: Optional[TmdbChain] = None
@@ -125,6 +127,9 @@ class NextReleaseTracker(_PluginBase):
         self._subscribe_chain = SubscribeChain()
         self._media_server_chain = MediaServerChain()
         self._restore_selected_track_state(config, normalized_config)
+        self._manual_tv_seasons = self._parse_manual_tv_season_text(
+            normalized_config.get("manual_tv_seasons")
+        )
         if self._selected_movie_ids and "enable_movie" not in config:
             self._enable_movie = True
             normalized_config["enable_movie"] = True
@@ -289,7 +294,11 @@ class NextReleaseTracker(_PluginBase):
                         search_model="tv_candidate_search_text",
                         page_model="tv_candidate_page",
                         placeholder="60625",
-                        saved_summary=self._selection_summary_alert("tracked_tv_ids", "剧集"),
+                        saved_summary=self._tv_selection_summary_alert(
+                            model_key="tracked_tv_ids",
+                            manual_season_model="manual_tv_seasons",
+                            candidates=tv_candidates,
+                        ),
                         saved_table=self._selection_current_table_live(
                             media_label="剧集",
                             model_key="tracked_tv_ids",
@@ -297,8 +306,33 @@ class NextReleaseTracker(_PluginBase):
                             track_lookup=tv_tracks,
                             is_movie=False,
                             candidates=tv_candidates,
+                            manual_tv_season_model="manual_tv_seasons",
                         ),
                         candidates=tv_candidates,
+                        add_button_expr=self._selection_add_tv_expr(
+                            model_key="tracked_tv_ids",
+                            add_model="tv_candidate_id",
+                            season_model="tv_manual_season",
+                            manual_season_model="manual_tv_seasons",
+                        ),
+                        add_aux_model="tv_manual_season",
+                        add_aux_label="已追到第几季",
+                        add_aux_placeholder="例如 1",
+                        extra_content=[
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "variant": "tonal",
+                                    "text": "如果某部剧没有本地历史或订阅线索，请在这里填写“已追到第几季”。保存后会立刻建立追踪基线，不再出现“等待确认”但没有入口的死状态。",
+                                },
+                            },
+                            self._textarea(
+                                "manual_tv_seasons",
+                                "剧集已追季数（每行一条）",
+                                "247718=1",
+                            ),
+                        ],
                     ),
                     self._form_selection_editor(
                         title="电影追更名单",
@@ -395,12 +429,14 @@ class NextReleaseTracker(_PluginBase):
             "max_tmdb_calls_per_minute": 5,
             "tracked_tv_ids": "",
             "tracked_movie_ids": "",
+            "manual_tv_seasons": "",
             "manual_movie_mappings": "",
             "tv_candidate_search_text": "",
             "movie_candidate_search_text": "",
             "tv_candidate_page": 1,
             "movie_candidate_page": 1,
             "tv_candidate_id": "",
+            "tv_manual_season": "",
             "tv_remove_id": "",
             "movie_candidate_id": "",
             "movie_remove_id": "",
@@ -1875,6 +1911,9 @@ class NextReleaseTracker(_PluginBase):
             "max_tmdb_calls_per_minute": self._normalize_tmdb_call_limit(config.get("max_tmdb_calls_per_minute")),
             "tracked_tv_ids": self._serialize_track_selection(self._parse_track_selection(config.get("tracked_tv_ids"))),
             "tracked_movie_ids": self._serialize_track_selection(self._parse_track_selection(config.get("tracked_movie_ids"))),
+            "manual_tv_seasons": self._serialize_manual_tv_season_text(
+                self._parse_manual_tv_season_text(config.get("manual_tv_seasons"))
+            ),
             "manual_movie_mappings": self._serialize_manual_mapping_text(
                 self._parse_manual_mapping_text(config.get("manual_movie_mappings"))
             ),
@@ -1882,6 +1921,11 @@ class NextReleaseTracker(_PluginBase):
 
     def _current_config_snapshot(self) -> Dict[str, Any]:
         current_mappings = self._state_store.get_manual_mappings() if self._state_store else {}
+        manual_tv_seasons = {
+            tmdb_id: season
+            for tmdb_id, season in self._manual_tv_seasons.items()
+            if tmdb_id in set(self._selected_tv_ids) and season > 0
+        }
         return {
             "enabled": self._enabled,
             "notify": self._notify,
@@ -1896,6 +1940,7 @@ class NextReleaseTracker(_PluginBase):
             "max_tmdb_calls_per_minute": self._max_tmdb_calls_per_minute,
             "tracked_tv_ids": self._serialize_track_selection(self._selected_tv_ids),
             "tracked_movie_ids": self._serialize_track_selection(self._selected_movie_ids),
+            "manual_tv_seasons": self._serialize_manual_tv_season_text(manual_tv_seasons),
             "manual_movie_mappings": self._serialize_manual_mapping_text(current_mappings),
         }
 
@@ -1910,18 +1955,19 @@ class NextReleaseTracker(_PluginBase):
 
     def _restore_selected_track_state(self, config: Dict[str, Any], normalized_config: Dict[str, Any]) -> None:
         store = self._ensure_state_store()
-        config_has_selection_keys = "tracked_tv_ids" in config or "tracked_movie_ids" in config
+        config_has_tv_selection_key = "tracked_tv_ids" in config
+        config_has_movie_selection_key = "tracked_movie_ids" in config
         stored_tv_ids = store.get_selected_tv_ids() if store.has_selected_track_ids() else []
         stored_movie_ids = store.get_selected_movie_ids() if store.has_selected_track_ids() else []
         recovered_tv_ids, recovered_movie_ids = self._recover_selected_track_ids_from_tracks()
-        if config_has_selection_keys:
-            config_tv_ids = self._parse_track_selection(normalized_config["tracked_tv_ids"])
-            config_movie_ids = self._parse_track_selection(normalized_config["tracked_movie_ids"])
-            self._selected_tv_ids = config_tv_ids or stored_tv_ids
-            self._selected_movie_ids = config_movie_ids or stored_movie_ids
-        else:
-            self._selected_tv_ids = stored_tv_ids or recovered_tv_ids
-            self._selected_movie_ids = stored_movie_ids or recovered_movie_ids
+        config_tv_ids = self._parse_track_selection(normalized_config["tracked_tv_ids"])
+        config_movie_ids = self._parse_track_selection(normalized_config["tracked_movie_ids"])
+        self._selected_tv_ids = (
+            config_tv_ids if config_has_tv_selection_key else stored_tv_ids or recovered_tv_ids
+        )
+        self._selected_movie_ids = (
+            config_movie_ids if config_has_movie_selection_key else stored_movie_ids or recovered_movie_ids
+        )
         self._persist_selected_track_state()
 
     def _recover_selected_track_ids_from_tracks(self) -> Tuple[List[int], List[int]]:
@@ -2072,32 +2118,39 @@ class NextReleaseTracker(_PluginBase):
         tv_lookup, movie_lookup = self._local_candidate_lookup()
 
         if self._enable_tv:
-            existing_tv_tracks = store.get_tv_tracks()
             for tmdb_id in self._selected_tv_ids:
-                if str(tmdb_id) in existing_tv_tracks:
-                    continue
                 candidate = tv_lookup.get(int(tmdb_id))
-                season = coerce_int((candidate or {}).get("baseline_season"), 0) or 0
-                if season <= 0:
+                existing_track = store.get_tv_tracks().get(str(tmdb_id)) or {}
+                existing_latest_season = coerce_int(existing_track.get("latest_season"), 0) or 0
+                manual_season = coerce_int(self._manual_tv_seasons.get(int(tmdb_id)), 0) or 0
+                baseline_season = coerce_int((candidate or {}).get("baseline_season"), 0) or 0
+                season = max(manual_season, baseline_season)
+                if season <= 0 or existing_latest_season >= season:
                     continue
                 store.acknowledge_tv_completion(
                     tmdb_id=tmdb_id,
-                    title=str((candidate or {}).get("title") or f"TMDB-{tmdb_id}"),
-                    year=self._as_str((candidate or {}).get("year")),
+                    title=str(
+                        existing_track.get("title")
+                        or (candidate or {}).get("title")
+                        or f"TMDB-{tmdb_id}"
+                    ),
+                    year=self._as_str(existing_track.get("year") or (candidate or {}).get("year")),
                     season=season,
                     source="selection_bootstrap",
                 )
 
         if self._enable_movie:
-            existing_movie_tracks = store.get_movie_tracks()
             for tmdb_id in self._selected_movie_ids:
+                existing_movie_tracks = store.get_movie_tracks()
                 if any(coerce_int(track.get("anchor_tmdb_id")) == int(tmdb_id) for track in existing_movie_tracks.values()):
                     continue
                 candidate = movie_lookup.get(int(tmdb_id))
-                if not candidate:
-                    continue
                 media = self._recognize_media(tmdb_id=tmdb_id, mtype=MediaType.MOVIE)
-                title = self._as_str((candidate or {}).get("title")) or self._as_str(self._media_value(media, "title")) or f"TMDB-{tmdb_id}"
+                title = (
+                    self._as_str((candidate or {}).get("title"))
+                    or self._as_str(self._media_value(media, "title"))
+                    or f"TMDB-{tmdb_id}"
+                )
                 year = self._as_str((candidate or {}).get("year")) or self._as_str(self._media_value(media, "year"))
                 collection_id = coerce_int(self._media_value(media, "collection_id"))
                 track = store.upsert_movie_track(
@@ -2207,6 +2260,30 @@ class NextReleaseTracker(_PluginBase):
         return "\n".join(str(value) for value in normalize_tmdb_id_list(values))
 
     @staticmethod
+    def _parse_manual_tv_season_text(value: Any) -> Dict[int, int]:
+        mappings: Dict[int, int] = {}
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line or "=" not in line:
+                continue
+            tmdb_text, season_text = line.split("=", 1)
+            tmdb_id = coerce_int(tmdb_text)
+            season = coerce_int(season_text)
+            if not tmdb_id or not season or season <= 0:
+                continue
+            mappings[int(tmdb_id)] = int(season)
+        return mappings
+
+    @staticmethod
+    def _serialize_manual_tv_season_text(mappings: Dict[int, int]) -> str:
+        rows = []
+        for tmdb_id in sorted(mappings):
+            season = coerce_int(mappings.get(tmdb_id), 0) or 0
+            if tmdb_id and season > 0:
+                rows.append(f"{int(tmdb_id)}={int(season)}")
+        return "\n".join(rows)
+
+    @staticmethod
     def _form_section_card(
         title: str,
         subtitle: str,
@@ -2268,6 +2345,11 @@ class NextReleaseTracker(_PluginBase):
         saved_table: dict,
         candidates: List[Dict[str, Any]],
         show_expr: Optional[str] = None,
+        add_button_expr: Optional[str] = None,
+        add_aux_model: Optional[str] = None,
+        add_aux_label: Optional[str] = None,
+        add_aux_placeholder: str = "",
+        extra_content: Optional[List[dict]] = None,
     ) -> dict:
         candidate_content: List[dict] = [
             {
@@ -2289,6 +2371,67 @@ class NextReleaseTracker(_PluginBase):
                 candidates=candidates,
             ),
         ]
+        add_row_content: List[dict] = [
+            self._col(
+                8,
+                {
+                    "component": "VTextField",
+                    "props": {
+                        "model": add_model,
+                        "label": f"手动输入{media_label}编号（高级）",
+                        "placeholder": placeholder,
+                        "clearable": True,
+                    },
+                },
+            ),
+            self._col(
+                4,
+                self._form_action_button(
+                    f"手动加入{media_label}名单",
+                    "primary",
+                    "mdi-plus",
+                    add_button_expr or self._selection_add_expr(model_key, add_model),
+                    "mt-md-6",
+                ),
+            ),
+        ]
+        if add_aux_model and add_aux_label:
+            add_row_content = [
+                self._col(
+                    5,
+                    {
+                        "component": "VTextField",
+                        "props": {
+                            "model": add_model,
+                            "label": f"手动输入{media_label}编号（高级）",
+                            "placeholder": placeholder,
+                            "clearable": True,
+                        },
+                    },
+                ),
+                self._col(
+                    3,
+                    {
+                        "component": "VTextField",
+                        "props": {
+                            "model": add_aux_model,
+                            "label": add_aux_label,
+                            "placeholder": add_aux_placeholder,
+                            "clearable": True,
+                        },
+                    },
+                ),
+                self._col(
+                    4,
+                    self._form_action_button(
+                        f"手动加入{media_label}名单",
+                        "primary",
+                        "mdi-plus",
+                        add_button_expr or self._selection_add_expr(model_key, add_model),
+                        "mt-md-6",
+                    ),
+                ),
+            ]
         return self._form_section_card(
             title=title,
             subtitle=subtitle,
@@ -2298,31 +2441,9 @@ class NextReleaseTracker(_PluginBase):
                 *candidate_content,
                 {
                     "component": "VRow",
-                    "content": [
-                        self._col(
-                            8,
-                            {
-                                "component": "VTextField",
-                                "props": {
-                                    "model": add_model,
-                                    "label": f"手动输入{media_label}编号（高级）",
-                                    "placeholder": placeholder,
-                                    "clearable": True,
-                                },
-                            },
-                        ),
-                        self._col(
-                            4,
-                            self._form_action_button(
-                                f"手动加入{media_label}名单",
-                                "primary",
-                                "mdi-plus",
-                                self._selection_add_expr(model_key, add_model),
-                                "mt-md-6",
-                            ),
-                        ),
-                    ],
+                    "content": add_row_content,
                 },
+                *(extra_content or []),
                 {
                     "component": "VRow",
                     "content": [
@@ -2423,6 +2544,96 @@ class NextReleaseTracker(_PluginBase):
             },
         }
 
+    @classmethod
+    def _manual_tv_season_map_expr(cls, model_key: str) -> str:
+        return (
+            "(() => { "
+            f"const lines = String(model.{model_key} || '').split(/\\r?\\n+/); "
+            "const mapping = {}; "
+            "lines.forEach((rawLine) => { "
+            "const line = String(rawLine || '').split('#')[0].trim(); "
+            "if (!line || !line.includes('=')) { return; } "
+            "const [tmdbText, seasonText] = line.split('=', 2); "
+            "const tmdbId = Number(String(tmdbText || '').trim()); "
+            "const season = Number(String(seasonText || '').trim()); "
+            "if (Number.isInteger(tmdbId) && tmdbId > 0 && Number.isInteger(season) && season > 0) { "
+            "mapping[tmdbId] = season; "
+            "} "
+            "}); "
+            "return mapping; "
+            "})()"
+        )
+
+    @classmethod
+    def _tv_selection_summary_expr(
+        cls,
+        *,
+        model_key: str,
+        manual_season_model: str,
+        candidates: List[Dict[str, Any]],
+    ) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        manual_seasons = cls._manual_tv_season_map_expr(manual_season_model)
+        candidate_titles = cls._js_value(
+            {
+                str(coerce_int(candidate.get("tmdb_id"), 0) or 0): str(
+                    candidate.get("title") or f"TMDB-{coerce_int(candidate.get('tmdb_id'), 0) or 0}"
+                )
+                for candidate in candidates
+                if coerce_int(candidate.get("tmdb_id"), 0)
+            }
+        )
+        candidate_baselines = cls._js_value(
+            {
+                str(coerce_int(candidate.get("tmdb_id"), 0) or 0): coerce_int(
+                    candidate.get("baseline_season"), 0
+                )
+                or 0
+                for candidate in candidates
+                if coerce_int(candidate.get("tmdb_id"), 0)
+            }
+        )
+        return (
+            "{{ (() => { "
+            f"const ids = {parsed}; "
+            f"const manualSeasons = {manual_seasons}; "
+            f"const candidateTitles = {candidate_titles}; "
+            f"const candidateBaselines = {candidate_baselines}; "
+            f"if (!ids.length) return `当前还没加入任何剧集。`; "
+            "const preview = ids.slice(0, 5).map((id) => { "
+            "const label = candidateTitles[String(id)] || `TMDB-${id}`; "
+            "const season = Number(manualSeasons[id] || candidateBaselines[String(id)] || 0); "
+            "if (season > 0) { "
+            "return `${label}（已追到 S${String(season).padStart(2, '0')}，保存后生效）`; "
+            "} "
+            "return `${label}（需填写已追到第几季）`; "
+            "}); "
+            "const extra = ids.length > preview.length ? `；另有 ${ids.length - preview.length} 项` : ''; "
+            "return `当前编辑中的剧集名单：${preview.join('；')}${extra}`; "
+            "})() }}"
+        )
+
+    @classmethod
+    def _tv_selection_summary_alert(
+        cls,
+        *,
+        model_key: str,
+        manual_season_model: str,
+        candidates: List[Dict[str, Any]],
+    ) -> dict:
+        return {
+            "component": "VAlert",
+            "props": {
+                "type": "info",
+                "variant": "tonal",
+                "text": cls._tv_selection_summary_expr(
+                    model_key=model_key,
+                    manual_season_model=manual_season_model,
+                    candidates=candidates,
+                ),
+            },
+        }
+
     def _selection_current_table(
         self,
         media_label: str,
@@ -2451,7 +2662,7 @@ class NextReleaseTracker(_PluginBase):
                 elif track and known_count:
                     status = f"已建立系列追踪（已知 {known_count} 部）"
                 else:
-                    status = "已加入，等待识别续作"
+                    status = "已加入，保存后建立追踪锚点"
                 rows.append(
                     [
                         (track or {}).get("title") or f"TMDB-{tmdb_id}",
@@ -2468,8 +2679,13 @@ class NextReleaseTracker(_PluginBase):
                     status = f"已追到 S{latest_season:02d}"
                     if pending_count:
                         status = f"{status} / 待关注 {pending_count} 季"
+                elif coerce_int(self._manual_tv_seasons.get(int(tmdb_id)), 0):
+                    status = (
+                        f"已填 S{coerce_int(self._manual_tv_seasons.get(int(tmdb_id)), 0):02d}"
+                        " / 等待保存生效"
+                    )
                 else:
-                    status = "已加入，等待确认追到哪一季"
+                    status = "已加入，请填写已追到第几季后保存"
                 rows.append(
                     [
                         track.get("title") or f"TMDB-{tmdb_id}",
@@ -2499,6 +2715,7 @@ class NextReleaseTracker(_PluginBase):
         track_lookup: Dict[str, Any],
         is_movie: bool,
         candidates: List[Dict[str, Any]],
+        manual_tv_season_model: Optional[str] = None,
     ) -> dict:
         headers = ["名称", "TMDB编号", "状态"]
         candidate_lookup = {
@@ -2534,18 +2751,24 @@ class NextReleaseTracker(_PluginBase):
                 elif movie_track and known_count:
                     status = f"已建立系列追踪（已知 {known_count} 部）"
                 else:
-                    status = "已加入，等待识别续作"
+                    status = "已加入，保存后建立追踪锚点"
             else:
                 tv_track = track_lookup.get(str(tmdb_id)) or {}
                 title = tv_track.get("title") or title
                 latest_season = coerce_int(tv_track.get("latest_season"), 0) or 0
                 pending_count = len(normalize_tmdb_id_list(tv_track.get("pending_seasons")))
+                baseline_season = coerce_int(candidate.get("baseline_season"), 0) or 0
                 if latest_season:
                     status = f"已追到 S{latest_season:02d}"
                     if pending_count:
                         status = f"{status} / 待关注 {pending_count} 季"
                 else:
-                    status = "已加入，等待确认追到哪一季"
+                    status = self._selection_live_tv_status_cell(
+                        model_key=model_key,
+                        manual_tv_season_model=manual_tv_season_model or "manual_tv_seasons",
+                        tmdb_id=tmdb_id,
+                        baseline_season=baseline_season,
+                    )
 
             body_rows.append(
                 {
@@ -2672,6 +2895,82 @@ class NextReleaseTracker(_PluginBase):
         )
 
     @classmethod
+    def _selection_add_tv_expr(
+        cls,
+        *,
+        model_key: str,
+        add_model: str,
+        season_model: str,
+        manual_season_model: str,
+    ) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        manual_seasons = cls._manual_tv_season_map_expr(manual_season_model)
+        return (
+            "(event) => { "
+            f"const candidate = Number(String(model.{add_model} || '').trim()); "
+            f"const season = Number(String(model.{season_model} || '').trim()); "
+            "if (!Number.isInteger(candidate) || candidate <= 0) { return; } "
+            "if (!Number.isInteger(season) || season <= 0) { return; } "
+            f"const ids = {parsed}; "
+            "if (!ids.includes(candidate)) { ids.push(candidate); } "
+            f"const mappings = {manual_seasons}; "
+            "mappings[candidate] = season; "
+            "const lines = Object.keys(mappings) "
+            ".map((key) => Number(key)) "
+            ".filter((key) => Number.isInteger(key) && key > 0 && Number(mappings[key]) > 0) "
+            ".sort((left, right) => left - right) "
+            ".map((key) => `${key}=${Number(mappings[key])}`); "
+            f"model.{model_key} = ids.join('\\n'); "
+            f"model.{manual_season_model} = lines.join('\\n'); "
+            f"model.{add_model} = ''; "
+            f"model.{season_model} = ''; "
+            "}"
+        )
+
+    @classmethod
+    def _selection_live_tv_status_expr(
+        cls,
+        *,
+        model_key: str,
+        manual_tv_season_model: str,
+        tmdb_id: int,
+        baseline_season: int,
+    ) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        manual_seasons = cls._manual_tv_season_map_expr(manual_tv_season_model)
+        return (
+            "{{ (() => { "
+            f"const ids = {parsed}; "
+            f"if (!ids.includes({int(tmdb_id)})) return ''; "
+            f"const mappings = {manual_seasons}; "
+            f"const season = Number(mappings[{int(tmdb_id)}] || {int(baseline_season)} || 0); "
+            "if (season > 0) { "
+            "return `已追到 S${String(season).padStart(2, '0')} / 保存后生效`; "
+            "} "
+            "return '已加入，请填写已追到第几季后保存'; "
+            "})() }}"
+        )
+
+    @classmethod
+    def _selection_live_tv_status_cell(
+        cls,
+        *,
+        model_key: str,
+        manual_tv_season_model: str,
+        tmdb_id: int,
+        baseline_season: int,
+    ) -> dict:
+        return {
+            "component": "span",
+            "text": cls._selection_live_tv_status_expr(
+                model_key=model_key,
+                manual_tv_season_model=manual_tv_season_model,
+                tmdb_id=tmdb_id,
+                baseline_season=baseline_season,
+            ),
+        }
+
+    @classmethod
     def _selection_add_fixed_expr(cls, model_key: str, tmdb_id: int) -> str:
         parsed = cls._selection_model_parse_js(model_key)
         return (
@@ -2718,7 +3017,11 @@ class NextReleaseTracker(_PluginBase):
             progress = (
                 f"当前到 {latest_text} / 待留意 {self._join_values(track.get('pending_seasons'))}"
                 if track
-                else "等待确认已追到哪一季"
+                else (
+                    f"已填 S{coerce_int(self._manual_tv_seasons.get(int(tmdb_id)), 0):02d} / 等待保存生效"
+                    if coerce_int(self._manual_tv_seasons.get(int(tmdb_id)), 0)
+                    else "请在配置页填写已追到第几季"
+                )
             )
             rows.append(
                 [
