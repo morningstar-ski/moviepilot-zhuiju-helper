@@ -947,14 +947,20 @@ class PluginPageTests(unittest.TestCase):
         form_text = repr(form)
 
         self.assertIn("\u5df2\u8ffd\u5230\u7b2c\u51e0\u5b63", form_text)
-        self.assertIn("\u5267\u96c6\u5df2\u8ffd\u5b63\u6570\uff08\u6bcf\u884c\u4e00\u6761\uff09", form_text)
         self.assertIn("tv_manual_season", form_text)
+        self.assertIn("tv_season_edit_tmdb_id", form_text)
+        self.assertIn("tv_season_edit_value", form_text)
+        self.assertIn("\u66f4\u65b0\u5b63\u6570", form_text)
+        self.assertIn("\u6e05\u9664\u5b63\u6570", form_text)
         self.assertIn("manual_tv_seasons", form_text)
-        self.assertIn("\u5f53\u524d\u7f16\u8f91\u4e2d\u7684\u5267\u96c6\u540d\u5355", form_text)
+        self.assertIn("\u5df2\u8ffd\u5b63\u6570", form_text)
+        self.assertNotIn("\u5267\u96c6\u5df2\u8ffd\u5b63\u6570\uff08\u6bcf\u884c\u4e00\u6761\uff09", form_text)
         self.assertEqual("", defaults["manual_tv_seasons"])
         self.assertEqual("", defaults["tv_manual_season"])
+        self.assertEqual("", defaults["tv_season_edit_tmdb_id"])
+        self.assertEqual("", defaults["tv_season_edit_value"])
 
-    def test_form_tv_live_table_status_uses_manual_tv_season_model(self):
+    def test_form_tv_table_does_not_render_raw_status_expression(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
         plugin.init_plugin(
@@ -967,14 +973,30 @@ class PluginPageTests(unittest.TestCase):
 
         form, _ = plugin.get_form()
         nodes = list(iter_component_nodes(form))
-        self.assertTrue(
-            any(
-                node.get("component") == "span"
-                and "manual_tv_seasons" in str(node.get("text", ""))
-                and "String(season).padStart(2, '0')" in str(node.get("text", ""))
-                for node in nodes
-            )
+        self.assertFalse(any("String(season).padStart(2, '0')" in str(node.get("text", "")) for node in nodes))
+        self.assertFalse(any("const mappings =" in str(node.get("text", "")) for node in nodes))
+        self.assertFalse(any("{{ (() => {" in str(node.get("text", "")) for node in nodes))
+
+    def test_form_tv_table_shows_manual_season_column_without_textarea(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "247718",
+                "manual_tv_seasons": "247718=2",
+            }
         )
+
+        form, _ = plugin.get_form()
+        form_text = repr(form)
+
+        self.assertIn("S02", form_text)
+        self.assertIn("当前已加入 1 个剧集：TMDB-247718（当前到 S02）", form_text)
+        self.assertIn("已追到 S02", form_text)
+        self.assertIn("剧集编号（已加入）", form_text)
+        self.assertNotIn("剧集已追季数（每行一条）", form_text)
     def test_form_candidates_ignore_tmdb_discover_noise(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
