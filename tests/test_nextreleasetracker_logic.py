@@ -1762,6 +1762,139 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual("transfer_complete", runtime["last_diagnostic"]["event"])
         self.assertEqual("diagnostic_transfer_complete", store.get_action_log()[-1]["action"])
 
+    def test_init_plugin_backfill_on_enable_runs_only_once_and_records_runtime_state(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        calls = []
+
+        def fake_import_transfer_history(*, days, reason):
+            calls.append((days, reason))
+            return {"days": days, "reason": reason, "records": 1}
+
+        plugin._import_transfer_history = fake_import_transfer_history
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "backfill_on_enable": True,
+                "history_days": 30,
+            }
+        )
+
+        runtime = plugin._ensure_state_store().get_runtime_state()
+        self.assertEqual([(30, "bootstrap")], calls)
+        self.assertTrue(runtime["bootstrap_history_imported"])
+        self.assertEqual({"days": 30, "reason": "bootstrap", "records": 1}, runtime["bootstrap_history_summary"])
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "backfill_on_enable": True,
+                "history_days": 30,
+            }
+        )
+
+        self.assertEqual([(30, "bootstrap")], calls)
+
+    def test_on_subscribe_complete_acknowledges_selected_tv_track(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "60625",
+            }
+        )
+
+        event = plugin_module.Event(
+            {
+                "subscribe_info": {"season": 3},
+                "mediainfo": {
+                    "tmdb_id": 60625,
+                    "type": plugin_module.MediaType.TV.value,
+                    "title": "Rick and Morty",
+                    "year": "2013",
+                },
+            }
+        )
+
+        plugin.on_subscribe_complete(event)
+
+        track = plugin._ensure_state_store().get_tv_tracks()["60625"]
+        self.assertEqual(3, track["latest_season"])
+        self.assertEqual("subscribe_complete", track["source"])
+        self.assertEqual("subscribe_complete", plugin._ensure_state_store().get_action_log()[-1]["action"])
+
+    def test_on_transfer_complete_ignores_unselected_tv_track(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "60625",
+            }
+        )
+
+        event = plugin_module.Event(
+            {
+                "meta": "S04",
+                "transfer_history_id": 9001,
+                "mediainfo": {
+                    "tmdb_id": 77777,
+                    "type": plugin_module.MediaType.TV.value,
+                    "title": "Ignored Series",
+                    "year": "2024",
+                },
+            }
+        )
+
+        plugin.on_transfer_complete(event)
+
+        self.assertEqual({}, plugin._ensure_state_store().get_tv_tracks())
+        self.assertEqual([], plugin._ensure_state_store().get_action_log())
+
+    def test_api_rescan_returns_scan_summary_from_single_scan_cycle(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": False,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "60625",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.acknowledge_tv_completion(
+            tmdb_id=60625,
+            title="Rick and Morty",
+            year="2013",
+            season=1,
+            source="manual",
+        )
+        plugin._tmdb_chain = types.SimpleNamespace(
+            tmdb_seasons=lambda tmdb_id: [
+                {"season_number": 2, "episode_count": 10, "air_date": "2026-06-01"},
+            ]
+        )
+        plugin._media_server_chain = types.SimpleNamespace(media_exists=lambda media: None)
+        plugin._subscribe_exists = lambda **kwargs: False
+
+        response = plugin.api_rescan({"scope": "tv", "notify": False})
+
+        self.assertTrue(response["success"])
+        summary = response["data"]
+        self.assertTrue(summary["success"])
+        self.assertEqual("tv", summary["scope"])
+        self.assertEqual("api", summary["reason"])
+        self.assertEqual(1, summary["scanned_tv"])
+        self.assertEqual(1, summary["tracks_updated"])
+        self.assertEqual([2], store.get_tv_tracks()["60625"]["pending_seasons"])
+
 
 if __name__ == "__main__":
     unittest.main()

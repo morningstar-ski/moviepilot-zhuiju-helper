@@ -27,6 +27,8 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, MediaType, NotificationType
 
+from .api_routes import NextReleaseTrackerApiMixin
+from .event_handlers import NextReleaseTrackerEventMixin
 from .logic import (
     coerce_int,
     normalize_tmdb_id_list,
@@ -35,6 +37,7 @@ from .logic import (
     select_ready_collection_movies,
     select_ready_tv_seasons,
 )
+from .scan_workflow import NextReleaseTrackerScanMixin
 from .state import TrackerStateStore
 
 
@@ -42,13 +45,18 @@ class ScanBudgetExhausted(RuntimeError):
     pass
 
 
-class NextReleaseTracker(_PluginBase):
+class NextReleaseTracker(
+    NextReleaseTrackerApiMixin,
+    NextReleaseTrackerEventMixin,
+    NextReleaseTrackerScanMixin,
+    _PluginBase,
+):
     plugin_name = "追剧助手"
     plugin_desc = (
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.23"
+    plugin_version = "1.1.24"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -166,57 +174,7 @@ class NextReleaseTracker(_PluginBase):
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                "path": "/tracks",
-                "endpoint": self.api_tracks,
-                "methods": ["GET"],
-                "summary": "Get tracker state",
-            },
-            {
-                "path": "/rescan",
-                "endpoint": self.api_rescan,
-                "methods": ["POST"],
-                "summary": "Run tracker scan immediately",
-            },
-            {
-                "path": "/track/add",
-                "endpoint": self.api_track_add,
-                "methods": ["POST"],
-                "summary": "Add a tracker entry manually",
-            },
-            {
-                "path": "/track/remove",
-                "endpoint": self.api_track_remove,
-                "methods": ["POST"],
-                "summary": "Remove a tracker entry",
-            },
-            {
-                "path": "/import/transfer_history",
-                "endpoint": self.api_import_transfer_history,
-                "methods": ["POST"],
-                "summary": "Backfill from transfer history",
-            },
-            {
-                "path": "/diagnostic/event",
-                "endpoint": self.api_diagnostic_event,
-                "methods": ["POST"],
-                "summary": "Dispatch a synthetic runtime diagnostic event",
-            },
-            {
-                "path": "/manual_map/add",
-                "endpoint": self.api_manual_map_add,
-                "methods": ["POST"],
-                "summary": "Add movie manual mapping",
-            },
-            {
-                "path": "/manual_map/remove",
-                "endpoint": self.api_manual_map_remove,
-                "methods": ["POST"],
-                "summary": "Remove movie manual mapping",
-            },
-        ]
-
+        return NextReleaseTrackerApiMixin.get_api(self)
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         state = self._ensure_state_store().snapshot()
         tv_tracks = state.get(TrackerStateStore.KEY_TRACKED_TV, {})
@@ -846,440 +804,47 @@ class NextReleaseTracker(_PluginBase):
             )
         return services
 
-    @eventmanager.register(EventType.SubscribeComplete)
     def on_subscribe_complete(self, event: Event):
-        if not self._enabled:
-            return
+        return NextReleaseTrackerEventMixin.on_subscribe_complete(self, event)
 
-        event_data = event.event_data or {}
-        subscribe_info = event_data.get("subscribe_info") or {}
-        mediainfo = event_data.get("mediainfo") or {}
-        tmdb_id = coerce_int(self._media_value(mediainfo, "tmdb_id"))
-        if not tmdb_id:
-            return
-
-        media_type = self._media_type_name(mediainfo)
-        if media_type == MediaType.TV.value and self._enable_tv:
-            if not self._is_selected_track(media_type, tmdb_id):
-                return
-            season = coerce_int(subscribe_info.get("season") or self._media_value(mediainfo, "season"), 1) or 1
-            track = self._ensure_state_store().acknowledge_tv_completion(
-                tmdb_id=tmdb_id,
-                title=str(self._media_value(mediainfo, "title") or f"TMDB-{tmdb_id}"),
-                year=self._as_str(self._media_value(mediainfo, "year")),
-                season=season,
-                source="subscribe_complete",
-            )
-            self._log("success", "subscribe_complete", f"Recorded TV completion: {track['title']} season {season}", {"tmdb_id": tmdb_id})
-            return
-
-        if media_type == MediaType.MOVIE.value and self._enable_movie:
-            if not self._is_selected_track(media_type, tmdb_id):
-                return
-            self._track_movie_event(
-                tmdb_id=tmdb_id,
-                title=str(self._media_value(mediainfo, "title") or f"TMDB-{tmdb_id}"),
-                year=self._as_str(self._media_value(mediainfo, "year")),
-                collection_id=coerce_int(self._media_value(mediainfo, "collection_id")),
-                source="subscribe_complete",
-            )
-
-    @eventmanager.register(EventType.TransferComplete)
     def on_transfer_complete(self, event: Event):
-        if not self._enabled:
-            return
-
-        event_data = event.event_data or {}
-        mediainfo = event_data.get("mediainfo")
-        if not mediainfo:
-            return
-
-        tmdb_id = coerce_int(self._media_value(mediainfo, "tmdb_id"))
-        if not tmdb_id:
-            return
-
-        media_type = self._media_type_name(mediainfo)
-        history_id = coerce_int(event_data.get("transfer_history_id"))
-        if media_type == MediaType.TV.value and self._enable_tv:
-            if not self._is_selected_track(media_type, tmdb_id):
-                return
-            meta = event_data.get("meta")
-            season = parse_season_token(meta) or coerce_int(self._media_value(mediainfo, "season"), 1) or 1
-            track = self._ensure_state_store().acknowledge_tv_completion(
-                tmdb_id=tmdb_id,
-                title=str(self._media_value(mediainfo, "title") or f"TMDB-{tmdb_id}"),
-                year=self._as_str(self._media_value(mediainfo, "year")),
-                season=season,
-                source="transfer_complete",
-                last_transfer_history_id=history_id,
-            )
-            self._log("success", "transfer_complete", f"Recorded TV transfer: {track['title']} season {season}", {"tmdb_id": tmdb_id})
-            return
-
-        if media_type == MediaType.MOVIE.value and self._enable_movie:
-            if not self._is_selected_track(media_type, tmdb_id):
-                return
-            self._track_movie_event(
-                tmdb_id=tmdb_id,
-                title=str(self._media_value(mediainfo, "title") or f"TMDB-{tmdb_id}"),
-                year=self._as_str(self._media_value(mediainfo, "year")),
-                collection_id=coerce_int(self._media_value(mediainfo, "collection_id")),
-                source="transfer_complete",
-                last_transfer_history_id=history_id,
-            )
+        return NextReleaseTrackerEventMixin.on_transfer_complete(self, event)
 
     def service_scan(self, scope: str = "all", reason: str = "cron_tick", notify: Optional[bool] = None):
-        return self._run_rescan(scope=scope, reason=reason, notify=notify)
+        return NextReleaseTrackerScanMixin.service_scan(self, scope=scope, reason=reason, notify=notify)
 
     def run_once_scan(self):
-        try:
-            return self._run_rescan(scope="all", reason="once", notify=self._notify)
-        finally:
-            if self._onlyonce:
-                self._onlyonce = False
-                self._save_current_config()
+        return NextReleaseTrackerScanMixin.run_once_scan(self)
 
     def stop_service(self):
-        pass
+        return NextReleaseTrackerScanMixin.stop_service(self)
 
     def api_tracks(self) -> Dict[str, Any]:
-        return self._ok("tracker state loaded", self._ensure_state_store().snapshot())
+        return NextReleaseTrackerApiMixin.api_tracks(self)
 
     def api_rescan(self, payload: Optional[dict] = Body(default=None)) -> Dict[str, Any]:
-        payload = payload or {}
-        scope = str(payload.get("scope") or "all").lower()
-        notify = payload.get("notify")
-        summary = self._run_rescan(scope=scope, reason="api", notify=notify)
-        return self._ok("scan completed" if summary.get("success") else "scan failed", summary)
+        return NextReleaseTrackerApiMixin.api_rescan(self, payload)
 
     def api_track_add(self, payload: Optional[dict] = Body(default=None)) -> Dict[str, Any]:
-        payload = payload or {}
-        tmdb_id = coerce_int(payload.get("tmdb_id"))
-        media_type = self._normalize_media_type(payload.get("media_type") or payload.get("type"))
-        if not tmdb_id or media_type not in {MediaType.TV.value, MediaType.MOVIE.value}:
-            return self._error("tmdb_id and media_type(tv/movie) are required")
-
-        if media_type == MediaType.TV.value:
-            season = coerce_int(payload.get("season"))
-            if not season:
-                return self._error("season is required for TV manual tracking")
-            self._select_track_id(media_type, tmdb_id)
-            media = self._recognize_media(tmdb_id=tmdb_id, mtype=MediaType.TV)
-            title = str(payload.get("title") or self._media_value(media, "title") or f"TMDB-{tmdb_id}")
-            year = self._as_str(payload.get("year") or self._media_value(media, "year"))
-            track = self._ensure_state_store().acknowledge_tv_completion(
-                tmdb_id=tmdb_id,
-                title=title,
-                year=year,
-                season=season,
-                source="manual",
-                note=self._as_str(payload.get("note")),
-            )
-            self._log("success", "track_add", f"Added TV track manually: {title} season {season}", {"tmdb_id": tmdb_id})
-            return self._ok("tv track added", track)
-
-        self._select_track_id(media_type, tmdb_id)
-        media = self._recognize_media(tmdb_id=tmdb_id, mtype=MediaType.MOVIE)
-        title = str(payload.get("title") or self._media_value(media, "title") or f"TMDB-{tmdb_id}")
-        year = self._as_str(payload.get("year") or self._media_value(media, "year"))
-        collection_id = coerce_int(payload.get("collection_id") or self._media_value(media, "collection_id"))
-        track = self._ensure_state_store().upsert_movie_track(
-            anchor_tmdb_id=tmdb_id,
-            title=title,
-            year=year,
-            source="manual",
-            collection_id=collection_id,
-            known_tmdb_ids=[tmdb_id],
-            note=self._as_str(payload.get("note")),
-        )
-        track = self._ensure_state_store().acknowledge_movie_completion(
-            track_key=track["track_key"],
-            tmdb_id=tmdb_id,
-            title=title,
-            year=year,
-            collection_id=collection_id,
-            source="manual",
-        )
-        self._log("success", "track_add", f"Added movie track manually: {title}", {"tmdb_id": tmdb_id, "collection_id": collection_id})
-        return self._ok("movie track added", track)
+        return NextReleaseTrackerApiMixin.api_track_add(self, payload)
 
     def api_track_remove(self, payload: Optional[dict] = Body(default=None)) -> Dict[str, Any]:
-        payload = payload or {}
-        media_type = self._normalize_media_type(payload.get("media_type") or payload.get("type"))
-        tmdb_id = coerce_int(payload.get("tmdb_id"))
-        collection_id = coerce_int(payload.get("collection_id"))
-
-        if media_type == MediaType.TV.value and tmdb_id:
-            selection_removed = self._deselect_track_id(media_type, tmdb_id)
-            removed = self._ensure_state_store().remove_tv_track(tmdb_id)
-            if not removed and not selection_removed:
-                return self._error("tv track not found")
-            title = (removed or {}).get("title") or f"TMDB-{tmdb_id}"
-            self._log("info", "track_remove", f"Removed TV tracking: {title}", {"tmdb_id": tmdb_id})
-            return self._ok("tv tracking removed", {"track": removed, "selection_removed": selection_removed})
-
-        if media_type == MediaType.MOVIE.value and (tmdb_id or collection_id):
-            selection_removed = self._deselect_track_id(media_type, tmdb_id) if tmdb_id else False
-            removed = self._ensure_state_store().remove_movie_track(anchor_tmdb_id=tmdb_id, collection_id=collection_id)
-            removed_anchor_tmdb_id = coerce_int((removed or {}).get("anchor_tmdb_id"))
-            if removed_anchor_tmdb_id:
-                selection_removed = self._deselect_track_id(media_type, removed_anchor_tmdb_id) or selection_removed
-            mapping_source_tmdb_id = tmdb_id or removed_anchor_tmdb_id
-            if mapping_source_tmdb_id:
-                self._ensure_state_store().remove_manual_mapping(mapping_source_tmdb_id)
-                self._save_current_config()
-            if not removed and not selection_removed:
-                return self._error("movie track not found")
-            title = (removed or {}).get("title") or f"TMDB-{tmdb_id or collection_id}"
-            self._log("info", "track_remove", f"Removed movie tracking: {title}", {"tmdb_id": tmdb_id, "collection_id": collection_id})
-            return self._ok("movie tracking removed", {"track": removed, "selection_removed": selection_removed})
-
-        return self._error("media_type and tmdb_id/collection_id are required")
+        return NextReleaseTrackerApiMixin.api_track_remove(self, payload)
 
     def api_import_transfer_history(self, payload: Optional[dict] = Body(default=None)) -> Dict[str, Any]:
-        payload = payload or {}
-        days = max(coerce_int(payload.get("days"), self._history_days) or self._history_days, 0)
-        summary = self._import_transfer_history(days=days, reason="api")
-        return self._ok("transfer history imported", summary)
+        return NextReleaseTrackerApiMixin.api_import_transfer_history(self, payload)
 
     def api_diagnostic_event(self, payload: Optional[dict] = Body(default=None)) -> Dict[str, Any]:
-        payload = payload or {}
-        if not self._enabled:
-            return self._error("plugin must be enabled before runtime diagnostics can run")
-
-        media_type = self._normalize_media_type(payload.get("media_type") or "tv")
-        if media_type != MediaType.TV.value:
-            return self._error("runtime diagnostics currently support TV only")
-
-        event_name = str(payload.get("event") or payload.get("event_type") or "transfer_complete").strip().lower()
-        if event_name not in {"subscribe_complete", "transfer_complete"}:
-            return self._error("event must be subscribe_complete or transfer_complete")
-
-        tmdb_id = coerce_int(payload.get("tmdb_id"), self.diagnostic_tv_tmdb_id) or self.diagnostic_tv_tmdb_id
-        season = max(coerce_int(payload.get("season"), 1) or 1, 1)
-        title = str(payload.get("title") or self.diagnostic_tv_title)
-        year = self._as_str(payload.get("year") or str(datetime.now().year))
-        cleanup = bool(payload.get("cleanup", True))
-        transfer_history_id = coerce_int(payload.get("transfer_history_id"), 9900001)
-
-        store = self._ensure_state_store()
-        store.remove_tv_track(tmdb_id)
-        temporary_selection = not self._is_selected_track(MediaType.TV.value, tmdb_id)
-        original_selected_tv_ids = list(self._selected_tv_ids)
-        if temporary_selection:
-            self._selected_tv_ids = normalize_tmdb_id_list([*self._selected_tv_ids, tmdb_id])
-
-        try:
-            event_data = self._build_diagnostic_event_payload(
-                event_name=event_name,
-                tmdb_id=tmdb_id,
-                title=title,
-                year=year,
-                season=season,
-                transfer_history_id=transfer_history_id,
-            )
-            self._dispatch_diagnostic_event(event_name=event_name, event_data=event_data)
-
-            track = None
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                track = store.get_tv_tracks().get(str(tmdb_id))
-                if track and int(track.get("latest_season") or 0) >= season:
-                    break
-                time.sleep(0.05)
-            success = bool(track) and int(track.get("latest_season") or 0) >= season
-            cleanup_performed = False
-            if cleanup and track:
-                cleanup_performed = bool(store.remove_tv_track(tmdb_id))
-        finally:
-            if temporary_selection:
-                self._selected_tv_ids = original_selected_tv_ids
-                if not cleanup:
-                    store.remove_tv_track(tmdb_id)
-
-        result = {
-            "success": success,
-            "event": event_name,
-            "media_type": media_type,
-            "tmdb_id": tmdb_id,
-            "title": title,
-            "year": year,
-            "season": season,
-            "cleanup": cleanup,
-            "cleanup_performed": cleanup_performed,
-            "track_detected": bool(track),
-            "latest_season": track.get("latest_season") if track else None,
-            "checked_at": self._now(),
-        }
-        if event_name == "transfer_complete":
-            result["transfer_history_id"] = transfer_history_id
-
-        store.update_runtime({"last_diagnostic": result})
-        context = {
-            "tmdb_id": tmdb_id,
-            "season": season,
-            "cleanup": cleanup,
-            "track_detected": bool(track),
-            "diagnostic": True,
-        }
-        if success:
-            self._log(
-                "success",
-                f"diagnostic_{event_name}",
-                f"Runtime diagnostic verified: {title} season {season}",
-                context,
-            )
-            return self._ok("runtime diagnostic verified", result)
-
-        self._log(
-            "warning",
-            f"diagnostic_{event_name}",
-            f"Runtime diagnostic did not create the expected track: {title} season {season}",
-            context,
-        )
-        return {
-            "success": False,
-            "message": "runtime diagnostic did not create the expected track",
-            "data": result,
-        }
+        return NextReleaseTrackerApiMixin.api_diagnostic_event(self, payload)
 
     def api_manual_map_add(self, payload: Optional[dict] = Body(default=None)) -> Dict[str, Any]:
-        payload = payload or {}
-        source_tmdb_id = coerce_int(payload.get("source_tmdb_id"))
-        target_tmdb_ids = payload.get("target_tmdb_ids") or []
-        if not source_tmdb_id or not isinstance(target_tmdb_ids, list):
-            return self._error("source_tmdb_id and list target_tmdb_ids are required")
-        mapping = self._ensure_state_store().set_manual_mapping(
-            source_tmdb_id=source_tmdb_id,
-            target_tmdb_ids=target_tmdb_ids,
-            note=self._as_str(payload.get("note")) or "",
-        )
-        self._save_current_config()
-        self._log("info", "manual_map_add", "movie manual mapping updated", {"source_tmdb_id": source_tmdb_id})
-        return self._ok("manual mapping saved", mapping)
+        return NextReleaseTrackerApiMixin.api_manual_map_add(self, payload)
 
     def api_manual_map_remove(self, payload: Optional[dict] = Body(default=None)) -> Dict[str, Any]:
-        payload = payload or {}
-        source_tmdb_id = coerce_int(payload.get("source_tmdb_id"))
-        if not source_tmdb_id:
-            return self._error("source_tmdb_id is required")
-        mapping = self._ensure_state_store().remove_manual_mapping(source_tmdb_id)
-        if not mapping:
-            return self._error("manual mapping not found")
-        self._save_current_config()
-        self._log("info", "manual_map_remove", "movie manual mapping removed", {"source_tmdb_id": source_tmdb_id})
-        return self._ok("manual mapping removed", mapping)
+        return NextReleaseTrackerApiMixin.api_manual_map_remove(self, payload)
 
     def _run_rescan(self, *, scope: str, reason: str, notify: Optional[bool]) -> Dict[str, Any]:
-        scope = scope if scope in {"all", "tv", "movie"} else "all"
-        if not self._scan_lock.acquire(blocking=False):
-            return {
-                "success": False,
-                "message": "scan is already running",
-                "scope": scope,
-                "reason": reason,
-            }
-
-        notify_flag = self._notify if notify is None else bool(notify)
-        tmdb_budget = self._create_tmdb_budget()
-        scan_cache: Dict[str, Dict[Any, Any]] = {
-            "media": {},
-            "tv_seasons": {},
-            "movie_collection": {},
-        }
-        task_plan = self._resolve_scan_task_plan(scope=scope, reason=reason)
-        summary: Dict[str, Any] = {
-            "success": True,
-            "scope": scope,
-            "reason": reason,
-            "started_at": self._now(),
-            "period_minutes": task_plan["period_minutes"],
-            "planned_tracks": len(task_plan["task_ids"]),
-            "remaining_tracks": task_plan["remaining_before"],
-            "scanned_tv": 0,
-            "scanned_movie": 0,
-            "tv_candidates": 0,
-            "movie_candidates": 0,
-            "notifications_sent": 0,
-            "tracks_completed": 0,
-            "tracks_updated": 0,
-            "existing_in_library": 0,
-            "existing_subscriptions": 0,
-            "errors": 0,
-            "budget_exhausted": False,
-            "tmdb_calls_limit": tmdb_budget["limit"],
-            "tmdb_calls_used": 0,
-        }
-
-        self._ensure_state_store().update_runtime(
-            {
-                "last_scan_started_at": summary["started_at"],
-                "last_scan_scope": scope,
-                "last_scan_reason": reason,
-            }
-        )
-
-        processed_task_ids: List[str] = []
-        try:
-            for task_id in task_plan["task_ids"]:
-                task = task_plan["task_map"].get(task_id)
-                if not task:
-                    processed_task_ids.append(task_id)
-                    continue
-                try:
-                    self._process_scan_task(
-                        task=task,
-                        summary=summary,
-                        notify_flag=notify_flag,
-                        scan_cache=scan_cache,
-                        tmdb_budget=tmdb_budget,
-                    )
-                    processed_task_ids.append(task_id)
-                except ScanBudgetExhausted:
-                    summary["budget_exhausted"] = True
-                    summary["message"] = (
-                        f"已达到本分钟 TMDB 调用上限 {tmdb_budget['limit']} 次，"
-                        "剩余条目会留到下一分钟继续。"
-                    )
-                    self._log(
-                        "warning",
-                        "scan_budget",
-                        summary["message"],
-                        {"scope": scope, "reason": reason},
-                    )
-                    break
-                except Exception as exc:
-                    logger.exception("[NextReleaseTracker] scan task failed")
-                    summary["errors"] += 1
-                    processed_task_ids.append(task_id)
-                    self._log(
-                        "error",
-                        "scan_track",
-                        f"扫描条目失败：{task_id} - {exc}",
-                        {"scope": scope, "reason": reason, "task_id": task_id},
-                    )
-        except Exception as exc:
-            logger.exception("[NextReleaseTracker] scan failed")
-            summary["success"] = False
-            summary["errors"] += 1
-            summary["message"] = f"scan failed: {exc}"
-            self._log("error", "scan", summary["message"])
-        finally:
-            self._commit_scan_task_progress(task_plan, processed_task_ids)
-            summary["tmdb_calls_used"] = tmdb_budget["used"] - tmdb_budget["used_before"]
-            summary["remaining_tracks"] = self._remaining_scan_tasks(task_plan, processed_task_ids)
-            summary["finished_at"] = self._now()
-            runtime_patch = {}
-            if reason != "cron_tick" or summary["planned_tracks"] or summary["errors"] or summary["budget_exhausted"]:
-                runtime_patch["last_scan_finished_at"] = summary["finished_at"]
-                runtime_patch["last_scan_summary"] = summary
-            if runtime_patch:
-                self._ensure_state_store().update_runtime(runtime_patch)
-            self._scan_lock.release()
-
-        if notify_flag and summary["errors"]:
-            self._notify_summary(summary)
-        return summary
+        return NextReleaseTrackerScanMixin._run_rescan(self, scope=scope, reason=reason, notify=notify)
 
     def _process_scan_task(
         self,
@@ -1290,25 +855,14 @@ class NextReleaseTracker(_PluginBase):
         scan_cache: Dict[str, Dict[Any, Any]],
         tmdb_budget: Dict[str, Any],
     ) -> None:
-        if task.get("kind") == "tv":
-            self._process_tv_scan_task(
-                task=task,
-                summary=summary,
-                notify_flag=notify_flag,
-                scan_cache=scan_cache,
-                tmdb_budget=tmdb_budget,
-            )
-            return
-        if task.get("kind") == "movie":
-            self._process_movie_scan_task(
-                task=task,
-                summary=summary,
-                notify_flag=notify_flag,
-                scan_cache=scan_cache,
-                tmdb_budget=tmdb_budget,
-            )
-            return
-        raise ValueError(f"Unknown scan task kind: {task.get('kind')}")
+        return NextReleaseTrackerScanMixin._process_scan_task(
+            self,
+            task=task,
+            summary=summary,
+            notify_flag=notify_flag,
+            scan_cache=scan_cache,
+            tmdb_budget=tmdb_budget,
+        )
 
     def _process_tv_scan_task(
         self,
@@ -1319,114 +873,14 @@ class NextReleaseTracker(_PluginBase):
         scan_cache: Dict[str, Dict[Any, Any]],
         tmdb_budget: Dict[str, Any],
     ) -> None:
-        track = self._ensure_state_store().get_tv_tracks().get(task.get("track_key"))
-        tmdb_id = coerce_int((track or {}).get("tmdb_id"))
-        if not track or not tmdb_id:
-            return
-
-        seasons = self._load_tv_seasons(tmdb_id=tmdb_id, scan_cache=scan_cache, tmdb_budget=tmdb_budget)
-        summary["scanned_tv"] += 1
-        candidates = select_ready_tv_seasons(
-            latest_season=coerce_int(track.get("latest_season"), 0) or 0,
-            pending_seasons=track.get("pending_seasons"),
-            seasons=seasons,
-            grace_days=self._grace_days,
-        )
-        summary["tv_candidates"] += len(candidates)
-        if not candidates:
-            return
-
-        media = self._recognize_media(
-            tmdb_id=tmdb_id,
-            mtype=MediaType.TV,
+        return NextReleaseTrackerScanMixin._process_tv_scan_task(
+            self,
+            task=task,
+            summary=summary,
+            notify_flag=notify_flag,
             scan_cache=scan_cache,
             tmdb_budget=tmdb_budget,
         )
-        exists_info = (self._media_server_chain or MediaServerChain()).media_exists(media) if media else None
-        title = track.get("title") or self._media_value(media, "title") or f"TMDB-{tmdb_id}"
-        year = self._as_str(track.get("year") or self._media_value(media, "year"))
-        current_latest_season = coerce_int(track.get("latest_season"), 0) or 0
-        detected_seasons = [candidate.season_number for candidate in candidates]
-        resolved_seasons: List[int] = []
-        available_seasons: List[int] = []
-        status: Optional[str] = None
-
-        for candidate in candidates:
-            if season_fully_exists(exists_info, candidate.season_number, candidate.episode_count):
-                self._log(
-                    "info",
-                    "tv_scan",
-                    f"Season already in library: {title} season {candidate.season_number}",
-                    {"tmdb_id": tmdb_id},
-                )
-                summary["existing_in_library"] += 1
-                status = self._merge_release_status(status, "library")
-                resolved_seasons.append(candidate.season_number)
-                continue
-
-            if self._subscribe_exists(tmdb_id=tmdb_id, season=candidate.season_number):
-                self._log(
-                    "info",
-                    "tv_scan",
-                    f"Season already subscribed: {title} season {candidate.season_number}",
-                    {"tmdb_id": tmdb_id},
-                )
-                summary["existing_subscriptions"] += 1
-                status = self._merge_release_status(status, "subscription")
-                resolved_seasons.append(candidate.season_number)
-                continue
-
-            self._log(
-                "success",
-                "tv_detected",
-                f"Detected next TV season: {title} season {candidate.season_number}",
-                {"tmdb_id": tmdb_id},
-            )
-            status = self._merge_release_status(status, "available")
-            available_seasons.append(candidate.season_number)
-
-        if not detected_seasons:
-            return
-        if notify_flag and available_seasons:
-            self._notify_tv_release(
-                title=title,
-                year=year,
-                tmdb_id=tmdb_id,
-                seasons=available_seasons,
-                status="available",
-            )
-            summary["notifications_sent"] += 1
-            self._complete_tv_tracking(tmdb_id)
-            summary["tracks_completed"] += 1
-            return
-        if notify_flag:
-            self._complete_tv_tracking(tmdb_id)
-            summary["tracks_completed"] += 1
-            return
-
-        if available_seasons:
-            first_available_season = min(available_seasons)
-            resolved_before_pending = [
-                season
-                for season in resolved_seasons
-                if season < first_available_season
-            ]
-            completed_latest_season = max(resolved_before_pending, default=current_latest_season)
-            if completed_latest_season > current_latest_season:
-                self._ensure_state_store().acknowledge_tv_completion(
-                    tmdb_id=tmdb_id,
-                    title=title,
-                    year=year,
-                    season=completed_latest_season,
-                    source="scan",
-                )
-            for season in available_seasons:
-                self._ensure_state_store().mark_tv_pending(tmdb_id, season)
-            summary["tracks_updated"] += 1
-            return
-
-        self._complete_tv_tracking(tmdb_id)
-        summary["tracks_completed"] += 1
 
     def _process_movie_scan_task(
         self,
@@ -1437,328 +891,39 @@ class NextReleaseTracker(_PluginBase):
         scan_cache: Dict[str, Dict[Any, Any]],
         tmdb_budget: Dict[str, Any],
     ) -> None:
-        track_key = str(task.get("track_key") or "")
-        track = self._ensure_state_store().get_movie_tracks().get(track_key)
-        if not track:
-            return
-
-        item_map: Dict[int, MediaInfo] = {}
-        collection_id = coerce_int(track.get("collection_id"))
-        if collection_id:
-            for item in self._load_movie_collection(
-                collection_id=collection_id,
-                scan_cache=scan_cache,
-                tmdb_budget=tmdb_budget,
-            ):
-                item_tmdb_id = coerce_int(self._media_value(item, "tmdb_id"))
-                if item_tmdb_id:
-                    item_map[item_tmdb_id] = item
-
-        manual_mapping = self._ensure_state_store().get_manual_mapping(
-            coerce_int(track.get("anchor_tmdb_id"), 0) or 0
+        return NextReleaseTrackerScanMixin._process_movie_scan_task(
+            self,
+            task=task,
+            summary=summary,
+            notify_flag=notify_flag,
+            scan_cache=scan_cache,
+            tmdb_budget=tmdb_budget,
         )
-        for target_tmdb_id in (manual_mapping or {}).get("target_tmdb_ids", []):
-            target_tmdb_id = coerce_int(target_tmdb_id)
-            if not target_tmdb_id or target_tmdb_id in item_map:
-                continue
-            media = self._recognize_media(
-                tmdb_id=target_tmdb_id,
-                mtype=MediaType.MOVIE,
-                scan_cache=scan_cache,
-                tmdb_budget=tmdb_budget,
-            )
-            if media:
-                item_map[target_tmdb_id] = media
-
-        summary["scanned_movie"] += 1
-        candidates = select_ready_collection_movies(
-            known_tmdb_ids=track.get("known_tmdb_ids"),
-            pending_tmdb_ids=track.get("pending_tmdb_ids"),
-            items=item_map.values(),
-            grace_days=self._grace_days,
-        )
-        summary["movie_candidates"] += len(candidates)
-        if not candidates:
-            return
-
-        detected_candidates = []
-        resolved_candidates = []
-        available_candidates = []
-        status: Optional[str] = None
-        for candidate in candidates:
-            media = item_map.get(candidate.tmdb_id)
-            title = candidate.title or track.get("title") or f"TMDB-{candidate.tmdb_id}"
-            exists_info = (self._media_server_chain or MediaServerChain()).media_exists(media) if media else None
-            detected_candidates.append(candidate)
-
-            if exists_info:
-                self._log("info", "movie_scan", f"Movie already in library: {title}", {"tmdb_id": candidate.tmdb_id})
-                summary["existing_in_library"] += 1
-                status = self._merge_release_status(status, "library")
-                resolved_candidates.append(candidate)
-                continue
-
-            if self._subscribe_exists(tmdb_id=candidate.tmdb_id):
-                self._log(
-                    "info",
-                    "movie_scan",
-                    f"Movie already subscribed: {title}",
-                    {"tmdb_id": candidate.tmdb_id},
-                )
-                summary["existing_subscriptions"] += 1
-                status = self._merge_release_status(status, "subscription")
-                resolved_candidates.append(candidate)
-                continue
-
-            self._log(
-                "success",
-                "movie_detected",
-                f"Detected next movie release: {title}",
-                {"tmdb_id": candidate.tmdb_id},
-            )
-            status = self._merge_release_status(status, "available")
-            available_candidates.append(candidate)
-
-        if not detected_candidates:
-            return
-        if notify_flag and available_candidates:
-            self._notify_movie_release(
-                title=track.get("title") or f"TMDB-{track.get('anchor_tmdb_id')}",
-                anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
-                collection_id=collection_id,
-                candidates=available_candidates,
-                status="available",
-            )
-            summary["notifications_sent"] += 1
-            self._complete_movie_tracking(
-                track_key=track_key,
-                anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
-            )
-            summary["tracks_completed"] += 1
-            return
-        if notify_flag:
-            self._complete_movie_tracking(
-                track_key=track_key,
-                anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
-            )
-            summary["tracks_completed"] += 1
-            return
-
-        if available_candidates:
-            current_track_key = track_key
-            for candidate in resolved_candidates:
-                current_track = self._ensure_state_store().acknowledge_movie_completion(
-                    track_key=current_track_key,
-                    tmdb_id=candidate.tmdb_id,
-                    title=candidate.title,
-                    year=candidate.year,
-                    source="scan",
-                    collection_id=candidate.collection_id or collection_id,
-                )
-                current_track_key = current_track["track_key"]
-            for candidate in available_candidates:
-                self._ensure_state_store().mark_movie_pending(current_track_key, candidate.tmdb_id)
-            summary["tracks_updated"] += 1
-            return
-
-        self._complete_movie_tracking(
-            track_key=track_key,
-            anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
-        )
-        summary["tracks_completed"] += 1
 
     def _resolve_scan_task_plan(self, *, scope: str, reason: str) -> Dict[str, Any]:
-        task_list = self._build_scan_tasks(scope)
-        task_map = {task["task_id"]: task for task in task_list}
-        if reason == "cron_tick":
-            return self._build_scheduled_task_plan(scope=scope, task_map=task_map)
-        task_ids = list(task_map.keys())
-        return {
-            "scheduled": False,
-            "period_minutes": 0,
-            "task_ids": task_ids,
-            "task_map": task_map,
-            "remaining_before": len(task_ids),
-        }
+        return NextReleaseTrackerScanMixin._resolve_scan_task_plan(self, scope=scope, reason=reason)
 
     def _build_scheduled_task_plan(self, *, scope: str, task_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        store = self._ensure_state_store()
-        runtime = store.get_runtime_state()
-        current_task_ids = list(task_map.keys())
-        period_minutes = self._estimate_cron_period_minutes(self._cron)
-        cycle_started_at = self._parse_runtime_datetime((runtime.get("scan_plan") or {}).get("cycle_started_at"))
-        cycle_config_matches = (
-            isinstance(runtime.get("scan_plan"), dict)
-            and (runtime.get("scan_plan") or {}).get("cron") == self._cron
-            and (runtime.get("scan_plan") or {}).get("scope") == scope
-            and coerce_int((runtime.get("scan_plan") or {}).get("period_minutes"), 0) == period_minutes
-        )
-        now = self._now_dt()
-        reset_cycle = (
-            not cycle_config_matches
-            or not cycle_started_at
-            or now >= cycle_started_at + timedelta(minutes=period_minutes)
-        )
-
-        if reset_cycle:
-            pending_task_ids = list(current_task_ids)
-            plan_state = {
-                "cron": self._cron,
-                "scope": scope,
-                "period_minutes": period_minutes,
-                "cycle_started_at": self._format_runtime_datetime(now),
-                "task_ids": list(current_task_ids),
-                "pending_task_ids": list(pending_task_ids),
-            }
-        else:
-            stored_plan = runtime.get("scan_plan") or {}
-            previous_task_ids = set(stored_plan.get("task_ids") or [])
-            pending_task_ids = [
-                task_id
-                for task_id in (stored_plan.get("pending_task_ids") or [])
-                if task_id in task_map
-            ]
-            pending_seen = set(pending_task_ids)
-            pending_task_ids.extend(
-                task_id
-                for task_id in current_task_ids
-                if task_id not in previous_task_ids and task_id not in pending_seen
-            )
-            plan_state = {
-                "cron": self._cron,
-                "scope": scope,
-                "period_minutes": period_minutes,
-                "cycle_started_at": stored_plan.get("cycle_started_at") or self._format_runtime_datetime(now),
-                "task_ids": list(current_task_ids),
-                "pending_task_ids": list(pending_task_ids),
-            }
-
-        started_at = self._parse_runtime_datetime(plan_state.get("cycle_started_at")) or now
-        total_tasks = len(current_task_ids)
-        processed_tasks = max(total_tasks - len(plan_state["pending_task_ids"]), 0)
-        elapsed_minutes = max(int((now - started_at).total_seconds() // 60), 0)
-        target_completed = min(
-            total_tasks,
-            math.ceil(((elapsed_minutes + 1) * total_tasks) / period_minutes) if total_tasks else 0,
-        )
-        due_count = max(target_completed - processed_tasks, 0)
-        due_task_ids = list(plan_state["pending_task_ids"][:due_count])
-
-        store.update_runtime({"scan_plan": plan_state})
-        return {
-            "scheduled": True,
-            "period_minutes": period_minutes,
-            "task_ids": due_task_ids,
-            "task_map": task_map,
-            "remaining_before": len(plan_state["pending_task_ids"]),
-            "plan_state": plan_state,
-        }
+        return NextReleaseTrackerScanMixin._build_scheduled_task_plan(self, scope=scope, task_map=task_map)
 
     def _build_scan_tasks(self, scope: str) -> List[Dict[str, Any]]:
-        groups: List[List[Dict[str, Any]]] = []
-        if scope in {"all", "tv"} and self._enable_tv:
-            tv_tracks = self._ensure_state_store().get_tv_tracks()
-            groups.append(
-                [
-                    {
-                        "task_id": f"tv:{track_key}",
-                        "kind": "tv",
-                        "track_key": track_key,
-                    }
-                    for track_key in sorted(tv_tracks.keys(), key=lambda value: coerce_int(value, 0) or 0)
-                ]
-            )
-        if scope in {"all", "movie"} and self._enable_movie:
-            movie_tracks = self._ensure_state_store().get_movie_tracks()
-            groups.append(
-                [
-                    {
-                        "task_id": f"movie:{track_key}",
-                        "kind": "movie",
-                        "track_key": track_key,
-                    }
-                    for track_key in sorted(
-                        movie_tracks.keys(),
-                        key=lambda key: (
-                            coerce_int((movie_tracks.get(key) or {}).get("anchor_tmdb_id"), 0) or 0,
-                            key,
-                        ),
-                    )
-                ]
-            )
-        return self._interleave_scan_groups(groups)
+        return NextReleaseTrackerScanMixin._build_scan_tasks(self, scope)
 
     @staticmethod
     def _interleave_scan_groups(groups: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-        normalized = [group for group in groups if group]
-        if not normalized:
-            return []
-        if len(normalized) == 1:
-            return list(normalized[0])
-        merged: List[Dict[str, Any]] = []
-        max_len = max(len(group) for group in normalized)
-        for index in range(max_len):
-            for group in normalized:
-                if index < len(group):
-                    merged.append(group[index])
-        return merged
+        return NextReleaseTrackerScanMixin._interleave_scan_groups(groups)
 
     def _commit_scan_task_progress(self, task_plan: Dict[str, Any], processed_task_ids: List[str]) -> None:
-        if not task_plan.get("scheduled") or not processed_task_ids:
-            return
-        processed_set = set(processed_task_ids)
-        plan_state = dict(task_plan.get("plan_state") or {})
-        plan_state["pending_task_ids"] = [
-            task_id
-            for task_id in (plan_state.get("pending_task_ids") or [])
-            if task_id not in processed_set
-        ]
-        self._ensure_state_store().update_runtime({"scan_plan": plan_state})
-        task_plan["plan_state"] = plan_state
+        return NextReleaseTrackerScanMixin._commit_scan_task_progress(self, task_plan, processed_task_ids)
 
     def _remaining_scan_tasks(self, task_plan: Dict[str, Any], processed_task_ids: List[str]) -> int:
-        if task_plan.get("scheduled"):
-            return len((task_plan.get("plan_state") or {}).get("pending_task_ids") or [])
-        return max(task_plan.get("remaining_before", 0) - len(processed_task_ids), 0)
+        return NextReleaseTrackerScanMixin._remaining_scan_tasks(self, task_plan, processed_task_ids)
 
     def _create_tmdb_budget(self) -> Dict[str, Any]:
-        store = self._ensure_state_store()
-        runtime = store.get_runtime_state()
-        limit = self._normalized_tmdb_call_limit(self._max_tmdb_calls_per_minute)
-        minute_key = self._now_dt().strftime("%Y-%m-%d %H:%M")
-        state = runtime.get("tmdb_rate_limit") or {}
-        used = coerce_int(state.get("used"), 0) or 0
-        if state.get("minute") != minute_key:
-            used = 0
-        store.update_runtime(
-            {
-                "tmdb_rate_limit": {
-                    "minute": minute_key,
-                    "used": used,
-                    "limit": limit,
-                }
-            }
-        )
-        return {
-            "limit": limit,
-            "minute": minute_key,
-            "used_before": used,
-            "used": used,
-        }
+        return NextReleaseTrackerScanMixin._create_tmdb_budget(self)
 
     def _consume_tmdb_budget(self, tmdb_budget: Dict[str, Any]) -> None:
-        if tmdb_budget["used"] >= tmdb_budget["limit"]:
-            raise ScanBudgetExhausted(f"tmdb minute budget exhausted: {tmdb_budget['minute']}")
-        tmdb_budget["used"] += 1
-        self._ensure_state_store().update_runtime(
-            {
-                "tmdb_rate_limit": {
-                    "minute": tmdb_budget["minute"],
-                    "used": tmdb_budget["used"],
-                    "limit": tmdb_budget["limit"],
-                }
-            }
-        )
+        return NextReleaseTrackerScanMixin._consume_tmdb_budget(self, tmdb_budget)
 
     def _load_tv_seasons(
         self,
@@ -1767,11 +932,12 @@ class NextReleaseTracker(_PluginBase):
         scan_cache: Dict[str, Dict[Any, Any]],
         tmdb_budget: Dict[str, Any],
     ) -> List[Any]:
-        cache = scan_cache.setdefault("tv_seasons", {})
-        if tmdb_id not in cache:
-            self._consume_tmdb_budget(tmdb_budget)
-            cache[tmdb_id] = (self._tmdb_chain or TmdbChain()).tmdb_seasons(tmdb_id) or []
-        return list(cache.get(tmdb_id) or [])
+        return NextReleaseTrackerScanMixin._load_tv_seasons(
+            self,
+            tmdb_id=tmdb_id,
+            scan_cache=scan_cache,
+            tmdb_budget=tmdb_budget,
+        )
 
     def _load_movie_collection(
         self,
@@ -1780,11 +946,12 @@ class NextReleaseTracker(_PluginBase):
         scan_cache: Dict[str, Dict[Any, Any]],
         tmdb_budget: Dict[str, Any],
     ) -> List[Any]:
-        cache = scan_cache.setdefault("movie_collection", {})
-        if collection_id not in cache:
-            self._consume_tmdb_budget(tmdb_budget)
-            cache[collection_id] = (self._tmdb_chain or TmdbChain()).tmdb_collection(collection_id) or []
-        return list(cache.get(collection_id) or [])
+        return NextReleaseTrackerScanMixin._load_movie_collection(
+            self,
+            collection_id=collection_id,
+            scan_cache=scan_cache,
+            tmdb_budget=tmdb_budget,
+        )
 
     def _import_transfer_history(self, *, days: int, reason: str) -> Dict[str, Any]:
         cutoff = datetime.now() - timedelta(days=max(days, 0))
@@ -1870,38 +1037,18 @@ class NextReleaseTracker(_PluginBase):
         source: str,
         last_transfer_history_id: Optional[int] = None,
     ) -> dict:
-        track = self._ensure_state_store().upsert_movie_track(
-            anchor_tmdb_id=tmdb_id,
-            title=title,
-            year=year,
-            source=source,
-            collection_id=collection_id,
-            known_tmdb_ids=[tmdb_id],
-            last_transfer_history_id=last_transfer_history_id,
-        )
-        track = self._ensure_state_store().acknowledge_movie_completion(
-            track_key=track["track_key"],
+        return NextReleaseTrackerEventMixin._track_movie_event(
+            self,
             tmdb_id=tmdb_id,
             title=title,
             year=year,
             collection_id=collection_id,
             source=source,
+            last_transfer_history_id=last_transfer_history_id,
         )
-        self._log("success", source, f"Recorded movie anchor: {title}", {"tmdb_id": tmdb_id, "collection_id": collection_id})
-        return track
 
     def _notify_summary(self, summary: Dict[str, Any]) -> None:
-        text = (
-            f"scope={summary.get('scope')} | "
-            f"notifications={summary.get('notifications_sent', 0)} | "
-            f"completed={summary.get('tracks_completed', 0)} | "
-            f"updated={summary.get('tracks_updated', 0)} | "
-            f"in_library={summary.get('existing_in_library', 0)} | "
-            f"existing_subscriptions={summary.get('existing_subscriptions', 0)} | "
-            f"errors={summary.get('errors', 0)}"
-        )
-        self.post_message(mtype=NotificationType.Plugin, title="追剧助手", text=text)
-
+        return NextReleaseTrackerScanMixin._notify_summary(self, summary)
     @staticmethod
     def _coerce_bool(value: Any, default: bool) -> bool:
         if value is None:
@@ -3458,38 +2605,19 @@ class NextReleaseTracker(_PluginBase):
         season: int,
         transfer_history_id: Optional[int],
     ) -> Dict[str, Any]:
-        mediainfo = {
-            "tmdb_id": tmdb_id,
-            "type": MediaType.TV.value,
-            "title": title,
-            "year": year,
-            "season": season,
-        }
-        if event_name == "subscribe_complete":
-            return {
-                "subscribe_id": 0,
-                "subscribe_info": {
-                    "season": season,
-                    "name": title,
-                    "type": MediaType.TV.value,
-                },
-                "mediainfo": mediainfo,
-            }
-        return {
-            "meta": f"S{season:02d}",
-            "mediainfo": mediainfo,
-            "transfer_history_id": transfer_history_id,
-            "transferinfo": {"success": True, "synthetic": True},
-            "fileitem": {"path": f"/diagnostics/{tmdb_id}/S{season:02d}.mkv"},
-        }
+        return NextReleaseTrackerEventMixin._build_diagnostic_event_payload(
+            self,
+            event_name=event_name,
+            tmdb_id=tmdb_id,
+            title=title,
+            year=year,
+            season=season,
+            transfer_history_id=transfer_history_id,
+        )
 
     @staticmethod
     def _dispatch_diagnostic_event(event_name: str, event_data: Dict[str, Any]) -> None:
-        if event_name == "subscribe_complete":
-            eventmanager.send_event(EventType.SubscribeComplete, event_data)
-            return
-        eventmanager.send_event(EventType.TransferComplete, event_data)
-
+        return NextReleaseTrackerEventMixin._dispatch_diagnostic_event(event_name, event_data)
     def _sorted_form_candidates(self, media_type: str) -> Tuple[List[Dict[str, Any]], int]:
         tv_lookup, movie_lookup = self._local_candidate_lookup()
         lookup = tv_lookup if media_type == MediaType.TV.value else movie_lookup
@@ -4130,3 +3258,4 @@ class NextReleaseTracker(_PluginBase):
         if text == "success":
             return "mdi-check-circle-outline"
         return "mdi-information-outline"
+
