@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.19"
+    plugin_version = "1.1.20"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -317,14 +317,14 @@ class NextReleaseTracker(_PluginBase):
                         ),
                         add_aux_model="tv_manual_season",
                         add_aux_label="已追到第几季",
-                        add_aux_placeholder="例如 1",
+                        add_aux_placeholder="例如 2 或 S02",
                         post_table_content=[
                             {
                                 "component": "VAlert",
                                 "props": {
                                     "type": "info",
                                     "variant": "tonal",
-                                    "text": "如果某部剧没有本地历史或订阅线索，可以在下面按 TMDB 编号补“已追到第几季”。点保存后会立刻建立追踪基线。",
+                                    "text": "如果某部剧没有本地历史或订阅线索，可以在下面按 TMDB 编号补“已追到第几季”。支持填 2 或 S02；点“更新季数”后再保存，或者直接填完点保存，都能生效。",
                                 },
                             },
                             {
@@ -349,7 +349,7 @@ class NextReleaseTracker(_PluginBase):
                                             "props": {
                                                 "model": "tv_season_edit_value",
                                                 "label": "已追到第几季",
-                                                "placeholder": "1",
+                                                "placeholder": "2 或 S02",
                                                 "clearable": True,
                                             },
                                         },
@@ -1957,6 +1957,23 @@ class NextReleaseTracker(_PluginBase):
         return 7 * 24 * 60
 
     def _normalize_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        tracked_tv_ids = self._parse_track_selection(config.get("tracked_tv_ids"))
+        manual_tv_seasons = self._parse_manual_tv_season_text(config.get("manual_tv_seasons"))
+
+        transient_add_tmdb_id = coerce_int(config.get("tv_candidate_id"))
+        transient_add_season = parse_season_token(config.get("tv_manual_season"))
+        if transient_add_tmdb_id and transient_add_season and transient_add_season > 0:
+            if transient_add_tmdb_id not in tracked_tv_ids:
+                tracked_tv_ids.append(int(transient_add_tmdb_id))
+            manual_tv_seasons[int(transient_add_tmdb_id)] = int(transient_add_season)
+
+        transient_edit_tmdb_id = coerce_int(config.get("tv_season_edit_tmdb_id"))
+        transient_edit_season = parse_season_token(config.get("tv_season_edit_value"))
+        if transient_edit_tmdb_id and transient_edit_season and transient_edit_season > 0:
+            if transient_edit_tmdb_id not in tracked_tv_ids:
+                tracked_tv_ids.append(int(transient_edit_tmdb_id))
+            manual_tv_seasons[int(transient_edit_tmdb_id)] = int(transient_edit_season)
+
         return {
             "enabled": self._coerce_bool(config.get("enabled"), False),
             "notify": self._coerce_bool(config.get("notify"), True),
@@ -1969,11 +1986,9 @@ class NextReleaseTracker(_PluginBase):
             "history_days": max(coerce_int(config.get("history_days"), 365) or 365, 0),
             "log_retention": max(coerce_int(config.get("log_retention"), 200) or 200, 20),
             "max_tmdb_calls_per_minute": self._normalize_tmdb_call_limit(config.get("max_tmdb_calls_per_minute")),
-            "tracked_tv_ids": self._serialize_track_selection(self._parse_track_selection(config.get("tracked_tv_ids"))),
+            "tracked_tv_ids": self._serialize_track_selection(tracked_tv_ids),
             "tracked_movie_ids": self._serialize_track_selection(self._parse_track_selection(config.get("tracked_movie_ids"))),
-            "manual_tv_seasons": self._serialize_manual_tv_season_text(
-                self._parse_manual_tv_season_text(config.get("manual_tv_seasons"))
-            ),
+            "manual_tv_seasons": self._serialize_manual_tv_season_text(manual_tv_seasons),
             "manual_movie_mappings": self._serialize_manual_mapping_text(
                 self._parse_manual_mapping_text(config.get("manual_movie_mappings"))
             ),
@@ -2328,7 +2343,7 @@ class NextReleaseTracker(_PluginBase):
                 continue
             tmdb_text, season_text = line.split("=", 1)
             tmdb_id = coerce_int(tmdb_text)
-            season = coerce_int(season_text)
+            season = parse_season_token(season_text)
             if not tmdb_id or not season or season <= 0:
                 continue
             mappings[int(tmdb_id)] = int(season)
@@ -2606,12 +2621,26 @@ class NextReleaseTracker(_PluginBase):
             "if (!line || !line.includes('=')) { return; } "
             "const [tmdbText, seasonText] = line.split('=', 2); "
             "const tmdbId = Number(String(tmdbText || '').trim()); "
-            "const season = Number(String(seasonText || '').trim()); "
+            "const match = String(seasonText || '').trim().match(/^S?(\\d+)$/i); "
+            "const season = match ? Number(match[1]) : NaN; "
             "if (Number.isInteger(tmdbId) && tmdbId > 0 && Number.isInteger(season) && season > 0) { "
             "mapping[tmdbId] = season; "
             "} "
             "}); "
             "return mapping; "
+            "})()"
+        )
+
+    @staticmethod
+    def _season_number_from_model_expr(model_name: str) -> str:
+        return (
+            "(() => { "
+            f"const raw = String(model.{model_name} || '').trim(); "
+            "if (!raw) { return null; } "
+            "const match = raw.match(/^S?(\\d+)$/i); "
+            "if (!match) { return null; } "
+            "const season = Number(match[1]); "
+            "return Number.isInteger(season) && season > 0 ? season : null; "
             "})()"
         )
 
@@ -2864,10 +2893,11 @@ class NextReleaseTracker(_PluginBase):
     ) -> str:
         parsed = cls._selection_model_parse_js(model_key)
         manual_seasons = cls._manual_tv_season_map_expr(manual_season_model)
+        season_expr = cls._season_number_from_model_expr(season_model)
         return (
             "(event) => { "
             f"const candidate = Number(String(model.{add_model} || '').trim()); "
-            f"const season = Number(String(model.{season_model} || '').trim()); "
+            f"const season = {season_expr}; "
             "if (!Number.isInteger(candidate) || candidate <= 0) { return; } "
             "if (!Number.isInteger(season) || season <= 0) { return; } "
             f"const ids = {parsed}; "
@@ -2897,10 +2927,11 @@ class NextReleaseTracker(_PluginBase):
     ) -> str:
         parsed = cls._selection_model_parse_js(model_key)
         manual_seasons = cls._manual_tv_season_map_expr(manual_season_model)
+        season_expr = cls._season_number_from_model_expr(season_model)
         return (
             "(event) => { "
             f"const tmdbId = Number(String(model.{tmdb_model} || '').trim()); "
-            f"const season = Number(String(model.{season_model} || '').trim()); "
+            f"const season = {season_expr}; "
             "if (!Number.isInteger(tmdbId) || tmdbId <= 0) { return; } "
             "if (!Number.isInteger(season) || season <= 0) { return; } "
             f"const ids = {parsed}; "

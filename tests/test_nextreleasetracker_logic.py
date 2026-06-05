@@ -1131,6 +1131,56 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual("TMDB-247718", tv_track["title"])
         self.assertEqual("247718=2", plugin._current_config_snapshot()["manual_tv_seasons"])
 
+    def test_transient_tv_season_edit_fields_are_applied_on_save(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin_module.TransferHistoryOper = lambda: types.SimpleNamespace(list_by_date=lambda _cutoff: [])
+        plugin_module.SubscribeOper = lambda: types.SimpleNamespace(list=lambda state=None: [])
+        plugin._tmdb_discover_candidates = lambda media_type: []
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "247718",
+                "tv_season_edit_tmdb_id": "247718",
+                "tv_season_edit_value": "S02",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        tv_track = store.get_tv_tracks()["247718"]
+
+        self.assertEqual([247718], plugin._selected_tv_ids)
+        self.assertEqual(2, tv_track["latest_season"])
+        self.assertEqual("247718=2", plugin._current_config_snapshot()["manual_tv_seasons"])
+
+    def test_transient_tv_add_fields_accept_sxx_and_bootstrap_track_on_save(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin_module.TransferHistoryOper = lambda: types.SimpleNamespace(list_by_date=lambda _cutoff: [])
+        plugin_module.SubscribeOper = lambda: types.SimpleNamespace(list=lambda state=None: [])
+        plugin._tmdb_discover_candidates = lambda media_type: []
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "",
+                "tv_candidate_id": "247718",
+                "tv_manual_season": "S02",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        tv_track = store.get_tv_tracks()["247718"]
+
+        self.assertEqual([247718], plugin._selected_tv_ids)
+        self.assertEqual(2, tv_track["latest_season"])
+        self.assertEqual("247718=2", plugin._current_config_snapshot()["manual_tv_seasons"])
+
     def test_manual_movie_selection_bootstraps_track_without_local_history(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
