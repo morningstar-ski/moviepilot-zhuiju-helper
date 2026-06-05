@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.22"
+    plugin_version = "1.1.23"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -58,6 +58,7 @@ class NextReleaseTracker(_PluginBase):
     diagnostic_tv_title = "NRT Diagnostic Series"
     FORM_CANDIDATE_LIMIT = 120
     FORM_CANDIDATE_PAGE_SIZE = 24
+    SELECTED_TRACK_PAGE_SIZE = 10
     DEFAULT_CRON = "0 3 * * 1"
     MAX_TMDB_CALLS_PER_MINUTE_CAP = 5
     SCAN_TICK_CRON = "* * * * *"
@@ -303,6 +304,7 @@ class NextReleaseTracker(_PluginBase):
                         saved_table=self._selection_current_table_live(
                             media_label="剧集",
                             model_key="tracked_tv_ids",
+                            page_model="tv_selected_page",
                             selected_ids=self._selected_tv_ids,
                             track_lookup=tv_tracks,
                             is_movie=False,
@@ -416,6 +418,7 @@ class NextReleaseTracker(_PluginBase):
                         saved_table=self._selection_current_table_live(
                             media_label="电影",
                             model_key="tracked_movie_ids",
+                            page_model="movie_selected_page",
                             selected_ids=self._selected_movie_ids,
                             track_lookup=movie_tracks,
                             is_movie=True,
@@ -503,6 +506,8 @@ class NextReleaseTracker(_PluginBase):
             "movie_candidate_search_text": "",
             "tv_candidate_page": 1,
             "movie_candidate_page": 1,
+            "tv_selected_page": 1,
+            "movie_selected_page": 1,
             "tv_candidate_id": "",
             "tv_manual_season": "",
             "tv_pending_notice": "",
@@ -1974,15 +1979,15 @@ class NextReleaseTracker(_PluginBase):
         transient_add_tmdb_id = coerce_int(config.get("tv_candidate_id"))
         transient_add_season = parse_season_token(config.get("tv_manual_season"))
         if transient_add_tmdb_id and transient_add_season and transient_add_season > 0:
-            if transient_add_tmdb_id not in tracked_tv_ids:
-                tracked_tv_ids.append(int(transient_add_tmdb_id))
+            tracked_tv_ids = [item for item in tracked_tv_ids if item != int(transient_add_tmdb_id)]
+            tracked_tv_ids.insert(0, int(transient_add_tmdb_id))
             manual_tv_seasons[int(transient_add_tmdb_id)] = int(transient_add_season)
 
         transient_edit_tmdb_id = coerce_int(config.get("tv_season_edit_tmdb_id"))
         transient_edit_season = parse_season_token(config.get("tv_season_edit_value"))
         if transient_edit_tmdb_id and transient_edit_season and transient_edit_season > 0:
-            if transient_edit_tmdb_id not in tracked_tv_ids:
-                tracked_tv_ids.append(int(transient_edit_tmdb_id))
+            tracked_tv_ids = [item for item in tracked_tv_ids if item != int(transient_edit_tmdb_id)]
+            tracked_tv_ids.insert(0, int(transient_edit_tmdb_id))
             manual_tv_seasons[int(transient_edit_tmdb_id)] = int(transient_edit_season)
 
         return {
@@ -2741,6 +2746,7 @@ class NextReleaseTracker(_PluginBase):
         *,
         media_label: str,
         model_key: str,
+        page_model: str,
         selected_ids: List[int],
         track_lookup: Dict[str, Any],
         is_movie: bool,
@@ -2849,7 +2855,14 @@ class NextReleaseTracker(_PluginBase):
             body_rows.append(
                 {
                     "component": "tr",
-                    "props": {"show": self._selection_contains_expr(model_key, tmdb_id)},
+                    "props": {
+                        "show": self._selection_paged_contains_expr(
+                            model_key=model_key,
+                            page_model=page_model,
+                            tmdb_id=tmdb_id,
+                            page_size=self.SELECTED_TRACK_PAGE_SIZE,
+                        )
+                    },
                     "content": row_content,
                 }
             )
@@ -2896,6 +2909,35 @@ class NextReleaseTracker(_PluginBase):
                         {"component": "tbody", "content": body_rows},
                     ],
                 },
+                {
+                    "component": "div",
+                    "props": {"class": "d-flex justify-end mt-3"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {
+                                "show": self._selection_pagination_needed_expr(
+                                    model_key=model_key,
+                                    page_size=self.SELECTED_TRACK_PAGE_SIZE,
+                                )
+                            },
+                            "content": [
+                                {
+                                    "component": "VPagination",
+                                    "props": {
+                                        "model": page_model,
+                                        "length": self._selection_page_length_expr(
+                                            model_key=model_key,
+                                            page_size=self.SELECTED_TRACK_PAGE_SIZE,
+                                        ),
+                                        "total-visible": 5,
+                                        "density": "comfortable",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
             ],
         }
 
@@ -2934,6 +2976,49 @@ class NextReleaseTracker(_PluginBase):
     def _selection_contains_expr(cls, model_key: str, tmdb_id: int) -> str:
         parsed = cls._selection_model_parse_js(model_key)
         return "{{ (() => { " f"const ids = {parsed}; " f"return ids.includes({int(tmdb_id)}); " "})() }}"
+
+    @classmethod
+    def _selection_paged_contains_expr(
+        cls,
+        *,
+        model_key: str,
+        page_model: str,
+        tmdb_id: int,
+        page_size: int,
+    ) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        return (
+            "{{ (() => { "
+            f"const ids = {parsed}; "
+            f"const pageSize = {int(page_size)}; "
+            f"const rawPage = Number(model.{page_model} || 1); "
+            "const totalPages = Math.max(1, Math.ceil(ids.length / pageSize)); "
+            "const page = Math.min(Math.max(Number.isFinite(rawPage) ? Math.trunc(rawPage) : 1, 1), totalPages); "
+            "const start = (page - 1) * pageSize; "
+            "const end = start + pageSize; "
+            f"return ids.slice(start, end).includes({int(tmdb_id)}); "
+            "})() }}"
+        )
+
+    @classmethod
+    def _selection_page_length_expr(cls, *, model_key: str, page_size: int) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        return (
+            "{{ (() => { "
+            f"const ids = {parsed}; "
+            f"return Math.max(1, Math.ceil(ids.length / {int(page_size)})); "
+            "})() }}"
+        )
+
+    @classmethod
+    def _selection_pagination_needed_expr(cls, *, model_key: str, page_size: int) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        return (
+            "{{ (() => { "
+            f"const ids = {parsed}; "
+            f"return ids.length > {int(page_size)}; "
+            "})() }}"
+        )
 
     @classmethod
     def _selection_manual_tv_season_exists_expr(cls, manual_tv_season_model: str, tmdb_id: int) -> str:

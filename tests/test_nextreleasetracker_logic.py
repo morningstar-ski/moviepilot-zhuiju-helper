@@ -765,6 +765,8 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual("", model["movie_candidate_search_text"])
         self.assertEqual(1, model["tv_candidate_page"])
         self.assertEqual(1, model["movie_candidate_page"])
+        self.assertEqual(1, model["tv_selected_page"])
+        self.assertEqual(1, model["movie_selected_page"])
         self.assertNotIn("tv_search_text", model)
         self.assertNotIn("movie_search_text", model)
         self.assertEqual(5, model["max_tmdb_calls_per_minute"])
@@ -1033,6 +1035,8 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("ids.unshift(candidate)", form_text)
         self.assertIn("tv_pending_notice", form_text)
         self.assertIn("待保存新增", form_text)
+        self.assertIn("tv_selected_page", form_text)
+        self.assertIn("VPagination", form_text)
 
     def test_form_candidates_ignore_tmdb_discover_noise(self):
         plugin_module = load_plugin_module()
