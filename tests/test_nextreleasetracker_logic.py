@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import types
 import unittest
 import importlib.util
@@ -169,8 +169,8 @@ def load_plugin_module():
         TransferComplete=_Value("TransferComplete"),
     )
     schemas_types_mod.MediaType = types.SimpleNamespace(
-        TV=_Value("电视剧"),
-        MOVIE=_Value("电影"),
+        TV=_Value("\u7535\u89c6\u5267"),
+        MOVIE=_Value("\u7535\u5f71"),
     )
     schemas_types_mod.NotificationType = types.SimpleNamespace(Plugin="Plugin")
     sys.modules["app.schemas.types"] = schemas_types_mod
@@ -393,7 +393,7 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual("60625", plugin._config["tracked_tv_ids"])
         self.assertEqual("550", plugin._config["tracked_movie_ids"])
 
-    def test_init_plugin_prefers_state_selection_over_stale_config_mirror(self):
+    def test_init_plugin_config_selection_overrides_existing_state_selection(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
         plugin._data[state.TrackerStateStore.KEY_SELECTED_TV_IDS] = [60625]
@@ -409,12 +409,99 @@ class PluginPageTests(unittest.TestCase):
         )
 
         store = plugin._ensure_state_store()
+        self.assertEqual([77777], plugin._selected_tv_ids)
+        self.assertEqual([603], plugin._selected_movie_ids)
+        self.assertEqual([77777], store.get_selected_tv_ids())
+        self.assertEqual([603], store.get_selected_movie_ids())
+        self.assertEqual("77777", plugin._config["tracked_tv_ids"])
+        self.assertEqual("603", plugin._config["tracked_movie_ids"])
+
+    def test_init_plugin_config_selection_overrides_existing_empty_state_keys(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_TV_IDS] = []
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_MOVIE_IDS] = []
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_movie": True,
+                "tracked_tv_ids": "60625",
+                "tracked_movie_ids": "603",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        self.assertEqual([60625], plugin._selected_tv_ids)
+        self.assertEqual([603], plugin._selected_movie_ids)
+        self.assertEqual([60625], store.get_selected_tv_ids())
+        self.assertEqual([603], store.get_selected_movie_ids())
+        self.assertEqual("60625", plugin._config["tracked_tv_ids"])
+        self.assertEqual("603", plugin._config["tracked_movie_ids"])
+
+    def test_init_plugin_recovers_tracks_when_empty_state_keys_exist(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        movie_track_key = logic.build_movie_track_key(None, 550)
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_TV_IDS] = []
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_MOVIE_IDS] = []
+        plugin._data[state.TrackerStateStore.KEY_TRACKED_TV] = {
+            logic.build_tv_track_key(60625): {
+                "tmdb_id": 60625,
+                "title": "Rick and Morty",
+                "year": "2013",
+                "latest_season": 1,
+                "pending_seasons": [],
+                "source": "manual",
+                "added_at": "2026-06-04 12:00:00",
+            }
+        }
+        plugin._data[state.TrackerStateStore.KEY_TRACKED_MOVIE] = {
+            movie_track_key: {
+                "track_key": movie_track_key,
+                "anchor_tmdb_id": 550,
+                "title": "Fight Club",
+                "year": "1999",
+                "collection_id": None,
+                "known_tmdb_ids": [550],
+                "pending_tmdb_ids": [],
+                "source": "manual",
+                "added_at": "2026-06-04 12:00:00",
+            }
+        }
+
+        plugin.init_plugin({})
+
+        store = plugin._ensure_state_store()
         self.assertEqual([60625], plugin._selected_tv_ids)
         self.assertEqual([550], plugin._selected_movie_ids)
         self.assertEqual([60625], store.get_selected_tv_ids())
         self.assertEqual([550], store.get_selected_movie_ids())
-        self.assertEqual("60625", plugin._config["tracked_tv_ids"])
-        self.assertEqual("550", plugin._config["tracked_movie_ids"])
+        self.assertIn("60625", store.get_tv_tracks())
+        self.assertIn(movie_track_key, store.get_movie_tracks())
+
+    def test_init_plugin_explicit_empty_selection_clears_existing_state_selection(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_TV_IDS] = [60625]
+        plugin._data[state.TrackerStateStore.KEY_SELECTED_MOVIE_IDS] = [550]
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_movie": True,
+                "tracked_tv_ids": "",
+                "tracked_movie_ids": "",
+            }
+        )
+
+        store = plugin._ensure_state_store()
+        self.assertEqual([], plugin._selected_tv_ids)
+        self.assertEqual([], plugin._selected_movie_ids)
+        self.assertEqual([], store.get_selected_tv_ids())
+        self.assertEqual([], store.get_selected_movie_ids())
+        self.assertEqual("", plugin._config["tracked_tv_ids"])
+        self.assertEqual("", plugin._config["tracked_movie_ids"])
 
     def test_init_plugin_with_explicit_empty_selection_still_cleans_stale_tracks(self):
         plugin_module = load_plugin_module()
@@ -535,8 +622,8 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual([], plugin._selected_tv_ids)
         self.assertEqual([], store.get_selected_tv_ids())
         self.assertEqual("", plugin._config["tracked_tv_ids"])
-        self.assertIn("新季 S02", plugin._last_message["text"])
-        self.assertIn("已结束本条追踪", plugin._last_message["text"])
+        self.assertIn("\u65b0\u5b63 S02", plugin._last_message["text"])
+        self.assertIn("\u5df2\u7ed3\u675f\u672c\u6761\u8ffd\u8e2a", plugin._last_message["text"])
 
     def test_history_import_only_applies_to_selected_items(self):
         plugin_module = load_plugin_module()
@@ -591,31 +678,40 @@ class PluginPageTests(unittest.TestCase):
         form, model = plugin.get_form()
         form_text = repr(form)
 
-        self.assertIn("剧集追更名单", form_text)
-        self.assertIn("手动加入剧集名单", form_text)
-        self.assertIn("直接搜剧名后加入", form_text)
-        self.assertIn("只会留意第三季，不会回头提示第一季", form_text)
-        self.assertIn("不会单靠 TMDB 猜", form_text)
-        self.assertIn("清空白名单", form_text)
-        self.assertIn("电影追更名单", form_text)
-        self.assertIn("插件会继续关注这部剧后面的新一季", form_text)
-        self.assertIn("候选检索", form_text)
-        self.assertIn("统一搜索候选剧集/电影", form_text)
-        self.assertIn("均摊周期 Cron", form_text)
-        self.assertIn("每分钟最多 5 次", form_text)
-        self.assertIn("电影手动关联（高级）", form_text)
+        self.assertIn("\u5267\u96c6\u8ffd\u66f4\u540d\u5355", form_text)
+        self.assertIn("\u624b\u52a8\u52a0\u5165\u5267\u96c6\u540d\u5355", form_text)
+        self.assertIn("\u6e05\u7a7a\u767d\u540d\u5355", form_text)
+        self.assertIn("\u5f53\u524d\u5df2\u52a0\u5165\u7684\u5267\u96c6", form_text)
+        self.assertIn("\u5f53\u524d\u5df2\u52a0\u5165\u7684\u7535\u5f71", form_text)
+        self.assertIn("\u5267\u96c6\u5019\u9009\u540d\u5355", form_text)
+        self.assertIn("\u7535\u5f71\u5019\u9009\u540d\u5355", form_text)
+        self.assertNotIn("\u5019\u9009\u68c0\u7d22", form_text)
+        self.assertIn("\u641c\u7d22\u5267\u96c6\u5019\u9009\u5217\u8868", form_text)
+        self.assertIn("\u641c\u7d22\u7535\u5f71\u5019\u9009\u5217\u8868", form_text)
+        self.assertNotIn("\u4e0b\u8868\u6309\u6700\u8fd1\u65f6\u95f4\u6392\u5e8f", form_text)
+        self.assertNotIn("\u7535\u5f71\u9ed8\u8ba4\u53ea\u4f1a\u6309 TMDB collection \u81ea\u52a8\u627e\u4e0b\u4e00\u90e8", form_text)
+        self.assertIn("\u6bcf\u5206\u949f\u6700\u591a 5 \u6b21", form_text)
+        self.assertIn("\u7535\u5f71\u624b\u52a8\u5173\u8054\uff08\u9ad8\u7ea7\uff09", form_text)
         self.assertIn("603=604,605", form_text)
-        self.assertIn("TMDB 编号", form_text)
-        self.assertIn("黑客帝国", form_text)
+        self.assertIn("TMDB \u7f16\u53f7", form_text)
+        self.assertIn("\u9ed1\u5ba2\u5e1d\u56fd", form_text)
         self.assertIn("TMDB collection", form_text)
         self.assertEqual("", model["tv_candidate_id"])
         self.assertEqual("", model["movie_remove_id"])
-        self.assertEqual("", model["candidate_search_text"])
+        self.assertEqual("", model["tv_candidate_search_text"])
+        self.assertEqual("", model["movie_candidate_search_text"])
         self.assertEqual(1, model["tv_candidate_page"])
         self.assertEqual(1, model["movie_candidate_page"])
         self.assertNotIn("tv_search_text", model)
         self.assertNotIn("movie_search_text", model)
         self.assertEqual(5, model["max_tmdb_calls_per_minute"])
+        self.assertFalse(
+            any(
+                node.get("component") == "VTextarea"
+                and (node.get("props") or {}).get("model") in {"tracked_tv_ids", "tracked_movie_ids"}
+                for node in iter_component_nodes(form)
+            )
+        )
 
     def test_form_section_show_expressions_use_model_scope(self):
         plugin_module = load_plugin_module()
@@ -691,8 +787,8 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual(2, tv_candidates[1]["latest_season"])
         self.assertEqual(5, tv_candidates[0]["baseline_season"])
         self.assertEqual(2, tv_candidates[1]["baseline_season"])
-        self.assertEqual(["最近订阅"], tv_candidates[0]["sources"])
-        self.assertEqual(["最近入库"], movie_candidates[0]["sources"])
+        self.assertEqual(["\u6700\u8fd1\u8ba2\u9605"], tv_candidates[0]["sources"])
+        self.assertEqual(["\u6700\u8fd1\u5165\u5e93"], movie_candidates[0]["sources"])
 
     def test_form_renders_candidate_table_when_local_history_exists(self):
         plugin_module = load_plugin_module()
@@ -714,13 +810,14 @@ class PluginPageTests(unittest.TestCase):
         plugin.init_plugin({"enabled": True, "enable_tv": True, "enable_movie": False})
         form, _ = plugin.get_form()
         form_text = repr(form)
-
-        self.assertIn("统一搜索候选剧集/电影", form_text)
+        self.assertIn("\u641c\u7d22\u5267\u96c6\u5019\u9009\u5217\u8868", form_text)
+        self.assertIn("\u5267\u96c6\u5019\u9009\u540d\u5355", form_text)
         self.assertIn("Rick and Morty", form_text)
-        self.assertIn("加入白名单", form_text)
+        self.assertIn("\u52a0\u5165\u767d\u540d\u5355", form_text)
         self.assertIn("VPagination", form_text)
         self.assertIn("tv_candidate_page", form_text)
-        self.assertNotIn("搜剧名或年份", form_text)
+        self.assertNotIn("\u4e0b\u8868\u6309\u6700\u8fd1\u65f6\u95f4\u6392\u5e8f", form_text)
+        self.assertNotIn("鎼滃墽鍚嶆垨骞翠唤", form_text)
 
         nodes = list(iter_component_nodes(form))
         self.assertTrue(
@@ -739,8 +836,34 @@ class PluginPageTests(unittest.TestCase):
             )
         )
         self.assertFalse(any("{{ (() => {" in str(node.get("text", "")) for node in nodes))
-        self.assertIn("超过 24 条时可翻页", form_text)
+        self.assertGreater(
+            form_text.index("\u5f53\u524d\u5df2\u52a0\u5165\u7684\u5267\u96c6"),
+            form_text.index("\u5267\u96c6\u5019\u9009\u540d\u5355"),
+        )
 
+    def test_form_keeps_selected_list_visible_when_no_local_candidates(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "60625",
+            }
+        )
+
+        form, _ = plugin.get_form()
+        form_text = repr(form)
+
+        self.assertIn("\u5f53\u524d\u5df2\u52a0\u5165\u7684\u5267\u96c6", form_text)
+        self.assertIn("\u5267\u96c6\u5019\u9009\u540d\u5355", form_text)
+        self.assertIn("60625", form_text)
+        self.assertIn("\u6682\u65e0\u6700\u8fd1\u51fa\u73b0\u8fc7\u7684\u5267\u96c6\u5019\u9009\uff1b\u53ef\u4ee5\u76f4\u63a5\u624b\u52a8\u8f93\u5165 TMDB \u7f16\u53f7\u52a0\u5165\u3002", form_text)
+        self.assertNotIn("\u4e0b\u8868\u6309\u6700\u8fd1\u65f6\u95f4\u6392\u5e8f", form_text)
+        self.assertNotIn("\u52a0\u5165\u540e\uff0c\u63d2\u4ef6\u4f1a\u7ee7\u7eed\u5173\u6ce8\u8fd9\u90e8\u5267\u540e\u9762\u7684\u65b0\u4e00\u5b63", form_text)
+        self.assertIn("tv_candidate_search_text", form_text)
+        self.assertNotIn('\"model\": \"candidate_search_text\"', form_text)
     def test_form_candidates_ignore_tmdb_discover_noise(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
@@ -1191,17 +1314,17 @@ class PluginPageTests(unittest.TestCase):
         page = plugin.get_page()
         page_text = repr(page)
 
-        self.assertIn("追剧助手", page_text)
-        self.assertIn("扫描全部", page_text)
-        self.assertIn("仅扫剧集", page_text)
-        self.assertIn("诊断订阅事件", page_text)
-        self.assertIn("诊断整理事件", page_text)
-        self.assertIn("回填最近 1 天", page_text)
-        self.assertNotIn("仅扫电影", page_text)
-        self.assertIn("运行态诊断", page_text)
-        self.assertIn("已加入的剧集", page_text)
-        self.assertIn("当前追踪中的剧集", page_text)
-        self.assertIn("最近动作日志", page_text)
+        self.assertIn("\u8ffd\u5267\u52a9\u624b", page_text)
+        self.assertIn("\u626b\u63cf\u5168\u90e8", page_text)
+        self.assertIn("\u4ec5\u626b\u5267\u96c6", page_text)
+        self.assertIn("\u8bca\u65ad\u8ba2\u9605\u4e8b\u4ef6", page_text)
+        self.assertIn("\u8bca\u65ad\u6574\u7406\u4e8b\u4ef6", page_text)
+        self.assertIn("\u56de\u586b\u6700\u8fd1 1 \u5929", page_text)
+        self.assertNotIn("\u4ec5\u626b\u7535\u5f71", page_text)
+        self.assertIn("\u8fd0\u884c\u6001\u8bca\u65ad", page_text)
+        self.assertIn("\u5df2\u52a0\u5165\u7684\u5267\u96c6", page_text)
+        self.assertIn("\u5f53\u524d\u8ffd\u8e2a\u4e2d\u7684\u5267\u96c6", page_text)
+        self.assertIn("\u6700\u8fd1\u52a8\u4f5c\u65e5\u5fd7", page_text)
         self.assertIn("plugin/NextReleaseTracker/rescan?apikey=test-token", page_text)
         self.assertIn("plugin/NextReleaseTracker/diagnostic/event?apikey=test-token", page_text)
 

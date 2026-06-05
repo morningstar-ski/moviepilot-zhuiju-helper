@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.14"
+    plugin_version = "1.1.15"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -215,8 +215,8 @@ class NextReleaseTracker(_PluginBase):
         state = self._ensure_state_store().snapshot()
         tv_tracks = state.get(TrackerStateStore.KEY_TRACKED_TV, {})
         movie_tracks = state.get(TrackerStateStore.KEY_TRACKED_MOVIE, {})
-        tv_candidates, hidden_tv_candidates = self._sorted_form_candidates(MediaType.TV.value)
-        movie_candidates, hidden_movie_candidates = self._sorted_form_candidates(MediaType.MOVIE.value)
+        tv_candidates, _ = self._sorted_form_candidates(MediaType.TV.value)
+        movie_candidates, _ = self._sorted_form_candidates(MediaType.MOVIE.value)
         return [
             {
                 "component": "VForm",
@@ -279,34 +279,6 @@ class NextReleaseTracker(_PluginBase):
                             },
                         ],
                     ),
-                    self._form_section_card(
-                        title="候选检索",
-                        subtitle="下面的剧集和电影候选会继续分开显示，但搜索框是统一的；输入片名、年份或 TMDB 编号后，会同时过滤两边的候选列表。",
-                        content=[
-                            {
-                                "component": "VTextField",
-                                "props": {
-                                    "model": "candidate_search_text",
-                                    "label": "统一搜索候选剧集/电影",
-                                    "placeholder": "例如：Rick、黑客帝国、2013、603",
-                                    "clearable": True,
-                                    "prepend-inner-icon": "mdi-magnify",
-                                    "hide-details": "auto",
-                                },
-                            },
-                            {
-                                "component": "VAlert",
-                                "props": {
-                                    "type": "info",
-                                    "variant": "tonal",
-                                    "text": (
-                                        f"候选列表默认每组每页显示 {self.FORM_CANDIDATE_PAGE_SIZE} 条，"
-                                        f"超过 {self.FORM_CANDIDATE_PAGE_SIZE} 条时可翻页，避免一屏拉太长。"
-                                    ),
-                                },
-                            },
-                        ],
-                    ),
                     self._form_selection_editor(
                         title="剧集追更名单",
                         subtitle="在这里添加你想继续追的剧。加入后，插件会优先用本地入库记录和订阅记录判断你已经追到哪一季；如果现在已经到第二季，后面只会留意第三季，不会回头提示第一季。可以直接搜剧名后加入，不需要自己查复杂编号。",
@@ -314,13 +286,19 @@ class NextReleaseTracker(_PluginBase):
                         model_key="tracked_tv_ids",
                         add_model="tv_candidate_id",
                         remove_model="tv_remove_id",
-                        search_model="candidate_search_text",
+                        search_model="tv_candidate_search_text",
                         page_model="tv_candidate_page",
                         placeholder="60625",
-                        saved_summary=self._selection_snapshot_alert("剧集", self._selected_tv_ids, tv_tracks, False),
+                        saved_summary=self._selection_summary_alert("tracked_tv_ids", "剧集"),
+                        saved_table=self._selection_current_table_live(
+                            media_label="剧集",
+                            model_key="tracked_tv_ids",
+                            selected_ids=self._selected_tv_ids,
+                            track_lookup=tv_tracks,
+                            is_movie=False,
+                            candidates=tv_candidates,
+                        ),
                         candidates=tv_candidates,
-                        hidden_candidate_count=hidden_tv_candidates,
-                        candidate_note="加入后，插件会继续关注这部剧后面的新一季，不会回头把更早的旧季再提示一遍；但“已追到哪一季”只会参考本地入库和订阅记录，不会单靠 TMDB 猜。特别篇、番外、重启版这类内容，一般不会算成同一部剧的下一季。",
                         show_expr="{{ model.enable_tv !== false }}",
                     ),
                     self._form_selection_editor(
@@ -330,13 +308,19 @@ class NextReleaseTracker(_PluginBase):
                         model_key="tracked_movie_ids",
                         add_model="movie_candidate_id",
                         remove_model="movie_remove_id",
-                        search_model="candidate_search_text",
+                        search_model="movie_candidate_search_text",
                         page_model="movie_candidate_page",
                         placeholder="550",
-                        saved_summary=self._selection_snapshot_alert("电影", self._selected_movie_ids, movie_tracks, True),
+                        saved_summary=self._selection_summary_alert("tracked_movie_ids", "电影"),
+                        saved_table=self._selection_current_table_live(
+                            media_label="电影",
+                            model_key="tracked_movie_ids",
+                            selected_ids=self._selected_movie_ids,
+                            track_lookup=movie_tracks,
+                            is_movie=True,
+                            candidates=movie_candidates,
+                        ),
                         candidates=movie_candidates,
-                        hidden_candidate_count=hidden_movie_candidates,
-                        candidate_note="电影默认只会按 TMDB collection 自动找下一部；TMDB 没给 collection 的电影不会自动猜，需要你手动补关联。",
                         show_expr="{{ model.enable_movie !== false }}",
                     ),
                     self._form_section_card(
@@ -414,7 +398,8 @@ class NextReleaseTracker(_PluginBase):
             "tracked_tv_ids": "",
             "tracked_movie_ids": "",
             "manual_movie_mappings": "",
-            "candidate_search_text": "",
+            "tv_candidate_search_text": "",
+            "movie_candidate_search_text": "",
             "tv_candidate_page": 1,
             "movie_candidate_page": 1,
             "tv_candidate_id": "",
@@ -1916,17 +1901,16 @@ class NextReleaseTracker(_PluginBase):
 
     def _restore_selected_track_state(self, config: Dict[str, Any], normalized_config: Dict[str, Any]) -> None:
         store = self._ensure_state_store()
-        if store.has_selected_track_ids():
-            self._selected_tv_ids = store.get_selected_tv_ids()
-            self._selected_movie_ids = store.get_selected_movie_ids()
-            return
-
         config_has_selection_keys = "tracked_tv_ids" in config or "tracked_movie_ids" in config
         if config_has_selection_keys:
             self._selected_tv_ids = self._parse_track_selection(normalized_config["tracked_tv_ids"])
             self._selected_movie_ids = self._parse_track_selection(normalized_config["tracked_movie_ids"])
         else:
-            self._selected_tv_ids, self._selected_movie_ids = self._recover_selected_track_ids_from_tracks()
+            stored_tv_ids = store.get_selected_tv_ids() if store.has_selected_track_ids() else []
+            stored_movie_ids = store.get_selected_movie_ids() if store.has_selected_track_ids() else []
+            recovered_tv_ids, recovered_movie_ids = self._recover_selected_track_ids_from_tracks()
+            self._selected_tv_ids = stored_tv_ids or recovered_tv_ids
+            self._selected_movie_ids = stored_movie_ids or recovered_movie_ids
         self._persist_selected_track_state()
 
     def _recover_selected_track_ids_from_tracks(self) -> Tuple[List[int], List[int]]:
@@ -2254,26 +2238,20 @@ class NextReleaseTracker(_PluginBase):
         page_model: str,
         placeholder: str,
         saved_summary: dict,
+        saved_table: dict,
         candidates: List[Dict[str, Any]],
-        hidden_candidate_count: int,
-        candidate_note: str,
         show_expr: str,
     ) -> dict:
         candidate_content: List[dict] = [
             {
-                "component": "VAlert",
+                "component": "VTextField",
                 "props": {
-                    "type": "info",
-                    "variant": "tonal",
-                    "text": f"下表按最近时间排序，并和上面的统一搜索框联动。{media_label}候选默认分页显示，避免一口气铺太长。",
-                },
-            },
-            {
-                "component": "VAlert",
-                "props": {
-                    "type": "warning",
-                    "variant": "tonal",
-                    "text": candidate_note,
+                    "model": search_model,
+                    "label": f"搜索{media_label}候选列表",
+                    "placeholder": "可以输入片名、年份或 TMDB 编号",
+                    "clearable": True,
+                    "prepend-inner-icon": "mdi-magnify",
+                    "hide-details": "auto",
                 },
             },
             self._candidate_selection_table(
@@ -2284,20 +2262,6 @@ class NextReleaseTracker(_PluginBase):
                 candidates=candidates,
             ),
         ]
-        if hidden_candidate_count:
-            candidate_content.append(
-                {
-                    "component": "VAlert",
-                    "props": {
-                        "type": "info",
-                        "variant": "tonal",
-                        "text": (
-                            f"当前候选池先保留最近 {len(candidates)} 项；每页显示 {self.FORM_CANDIDATE_PAGE_SIZE} 项。"
-                            "如果你要找的内容不在这里，也可以直接手动补编号。"
-                        ),
-                    },
-                }
-            )
         return self._form_section_card(
             title=title,
             subtitle=subtitle,
@@ -2369,17 +2333,7 @@ class NextReleaseTracker(_PluginBase):
                         ),
                     ],
                 },
-                {
-                    "component": "VTextarea",
-                    "props": {
-                        "model": model_key,
-                        "label": f"已选{media_label}编号（高级）",
-                        "placeholder": f"一行一个，例如 {placeholder}",
-                        "rows": 5,
-                        "auto-grow": True,
-                        "messages": self._selection_messages_expr(model_key, media_label),
-                    },
-                },
+                saved_table,
                 {
                     "component": "VAlert",
                     "props": {
@@ -2431,6 +2385,198 @@ class NextReleaseTracker(_PluginBase):
             alert_type = "success"
         return {"component": "VAlert", "props": {"type": alert_type, "variant": "tonal", "text": text}}
 
+    @classmethod
+    def _selection_summary_alert(cls, model_key: str, media_label: str) -> dict:
+        return {
+            "component": "VAlert",
+            "props": {
+                "type": "info",
+                "variant": "tonal",
+                "text": cls._selection_summary_expr(model_key, media_label),
+            },
+        }
+
+    def _selection_current_table(
+        self,
+        media_label: str,
+        selected_ids: List[int],
+        track_lookup: Dict[str, Any],
+        is_movie: bool,
+    ) -> dict:
+        headers = ["名称", "TMDB", "当前状态"]
+        rows: List[List[Any]] = []
+
+        if is_movie:
+            movie_tracks = list(track_lookup.values())
+            for tmdb_id in selected_ids:
+                track = next(
+                    (
+                        item
+                        for item in movie_tracks
+                        if coerce_int(item.get("anchor_tmdb_id"), 0) == int(tmdb_id)
+                    ),
+                    {},
+                )
+                pending_count = len(normalize_tmdb_id_list((track or {}).get("pending_tmdb_ids")))
+                known_count = len(normalize_tmdb_id_list((track or {}).get("known_tmdb_ids")))
+                if pending_count:
+                    status = f"已识别 {pending_count} 个待关注续作"
+                elif track and known_count:
+                    status = f"已建立系列追踪（已知 {known_count} 部）"
+                else:
+                    status = "已加入，等待识别续作"
+                rows.append(
+                    [
+                        (track or {}).get("title") or f"TMDB-{tmdb_id}",
+                        tmdb_id,
+                        status,
+                    ]
+                )
+        else:
+            for tmdb_id in selected_ids:
+                track = track_lookup.get(str(tmdb_id)) or {}
+                latest_season = coerce_int(track.get("latest_season"), 0) or 0
+                pending_count = len(normalize_tmdb_id_list(track.get("pending_seasons")))
+                if latest_season:
+                    status = f"已追到 S{latest_season:02d}"
+                    if pending_count:
+                        status = f"{status} / 待关注 {pending_count} 季"
+                else:
+                    status = "已加入，等待确认追到哪一季"
+                rows.append(
+                    [
+                        track.get("title") or f"TMDB-{tmdb_id}",
+                        tmdb_id,
+                        status,
+                    ]
+                )
+
+        return {
+            "component": "div",
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "text-subtitle-2 mt-3 mb-2"},
+                    "text": f"当前已加入的{media_label}",
+                },
+                self._simple_table(headers, rows, empty_text=f"当前还没有加入任何{media_label}。"),
+            ],
+        }
+
+    def _selection_current_table_live(
+        self,
+        *,
+        media_label: str,
+        model_key: str,
+        selected_ids: List[int],
+        track_lookup: Dict[str, Any],
+        is_movie: bool,
+        candidates: List[Dict[str, Any]],
+    ) -> dict:
+        headers = ["名称", "TMDB编号", "状态"]
+        candidate_lookup = {
+            coerce_int(candidate.get("tmdb_id"), 0) or 0: candidate
+            for candidate in candidates
+            if coerce_int(candidate.get("tmdb_id"), 0)
+        }
+        ordered_ids: List[int] = []
+        for tmdb_id in [*selected_ids, *candidate_lookup.keys()]:
+            normalized = coerce_int(tmdb_id, 0) or 0
+            if normalized and normalized not in ordered_ids:
+                ordered_ids.append(normalized)
+
+        body_rows: List[dict] = []
+        for tmdb_id in ordered_ids:
+            candidate = candidate_lookup.get(tmdb_id) or {}
+            title = candidate.get("title") or f"TMDB-{tmdb_id}"
+
+            if is_movie:
+                movie_track = next(
+                    (
+                        item
+                        for item in track_lookup.values()
+                        if coerce_int(item.get("anchor_tmdb_id"), 0) == int(tmdb_id)
+                    ),
+                    {},
+                )
+                title = movie_track.get("title") or title
+                pending_count = len(normalize_tmdb_id_list((movie_track or {}).get("pending_tmdb_ids")))
+                known_count = len(normalize_tmdb_id_list((movie_track or {}).get("known_tmdb_ids")))
+                if pending_count:
+                    status = f"已识别 {pending_count} 个待关注续作"
+                elif movie_track and known_count:
+                    status = f"已建立系列追踪（已知 {known_count} 部）"
+                else:
+                    status = "已加入，等待识别续作"
+            else:
+                tv_track = track_lookup.get(str(tmdb_id)) or {}
+                title = tv_track.get("title") or title
+                latest_season = coerce_int(tv_track.get("latest_season"), 0) or 0
+                pending_count = len(normalize_tmdb_id_list(tv_track.get("pending_seasons")))
+                if latest_season:
+                    status = f"已追到 S{latest_season:02d}"
+                    if pending_count:
+                        status = f"{status} / 待关注 {pending_count} 季"
+                else:
+                    status = "已加入，等待确认追到哪一季"
+
+            body_rows.append(
+                {
+                    "component": "tr",
+                    "props": {"show": self._selection_contains_expr(model_key, tmdb_id)},
+                    "content": [
+                        self._table_cell(title),
+                        self._table_cell(tmdb_id),
+                        self._table_cell(status),
+                    ],
+                }
+            )
+
+        return {
+            "component": "div",
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "text-subtitle-2 mt-3 mb-2"},
+                    "text": f"当前已加入的{media_label}",
+                },
+                {
+                    "component": "div",
+                    "props": {"show": self._selection_empty_expr(model_key)},
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "nrt-empty"},
+                            "text": f"当前还没有加入任何{media_label}。",
+                        }
+                    ],
+                },
+                {
+                    "component": "VTable",
+                    "props": {
+                        "hover": True,
+                        "density": "compact",
+                        "show": self._selection_has_any_expr(model_key),
+                    },
+                    "content": [
+                        {
+                            "component": "thead",
+                            "content": [
+                                {
+                                    "component": "tr",
+                                    "content": [
+                                        {"component": "th", "props": {"class": "text-start"}, "text": header}
+                                        for header in headers
+                                    ],
+                                }
+                            ],
+                        },
+                        {"component": "tbody", "content": body_rows},
+                    ],
+                },
+            ],
+        }
+
     @staticmethod
     def _selection_model_parse_js(model_key: str) -> str:
         return (
@@ -2464,6 +2610,16 @@ class NextReleaseTracker(_PluginBase):
             f"return ids.length ? [`已识别 ${{ids.length}} 个有效{media_label}编号`] : ['一行填一个编号；点保存后才会真正生效']; "
             "})() }}"
         )
+
+    @classmethod
+    def _selection_has_any_expr(cls, model_key: str) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        return "{{ (() => { " f"const ids = {parsed}; " "return ids.length > 0; " "})() }}"
+
+    @classmethod
+    def _selection_empty_expr(cls, model_key: str) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        return "{{ (() => { " f"const ids = {parsed}; " "return ids.length === 0; " "})() }}"
 
     @classmethod
     def _selection_contains_expr(cls, model_key: str, tmdb_id: int) -> str:
@@ -2935,11 +3091,25 @@ class NextReleaseTracker(_PluginBase):
         candidates: List[Dict[str, Any]],
     ) -> dict:
         headers = ["片名", "年份", "TMDB", "最近时间", "来源", "线索", "操作"]
+        table_content: List[dict]
         if not candidates:
+            table_content = [
+                {
+                    "component": "div",
+                    "props": {"class": "nrt-empty"},
+                    "text": f"暂无最近出现过的{media_label}候选；可以直接手动输入 TMDB 编号加入。",
+                }
+            ]
             return {
                 "component": "div",
-                "props": {"class": "nrt-empty"},
-                "text": f"这里暂时没有最近出现过的{media_label}；你也可以直接手动输入编号加入。",
+                "content": [
+                    {
+                        "component": "div",
+                        "props": {"class": "text-subtitle-2 mt-3 mb-2"},
+                        "text": f"{media_label}候选名单",
+                    },
+                    *table_content,
+                ],
             }
 
         is_tv = media_label == "剧集"
@@ -3000,6 +3170,11 @@ class NextReleaseTracker(_PluginBase):
         return {
             "component": "div",
             "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "text-subtitle-2 mt-3 mb-2"},
+                    "text": f"{media_label}候选名单",
+                },
                 {
                     "component": "VTable",
                     "props": {"hover": True, "density": "compact"},
