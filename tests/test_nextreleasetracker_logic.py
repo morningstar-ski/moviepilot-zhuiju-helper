@@ -950,6 +950,8 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("tv_manual_season", form_text)
         self.assertIn("tv_season_edit_tmdb_id", form_text)
         self.assertIn("tv_season_edit_value", form_text)
+        self.assertIn("tv_pending_notice", form_text)
+        self.assertIn("\u5f85\u4fdd\u5b58\u64cd\u4f5c", form_text)
         self.assertIn("\u66f4\u65b0\u5b63\u6570", form_text)
         self.assertIn("\u6e05\u9664\u5b63\u6570", form_text)
         self.assertIn("manual_tv_seasons", form_text)
@@ -957,6 +959,7 @@ class PluginPageTests(unittest.TestCase):
         self.assertNotIn("\u5267\u96c6\u5df2\u8ffd\u5b63\u6570\uff08\u6bcf\u884c\u4e00\u6761\uff09", form_text)
         self.assertEqual("", defaults["manual_tv_seasons"])
         self.assertEqual("", defaults["tv_manual_season"])
+        self.assertEqual("", defaults["tv_pending_notice"])
         self.assertEqual("", defaults["tv_season_edit_tmdb_id"])
         self.assertEqual("", defaults["tv_season_edit_value"])
 
@@ -1018,6 +1021,18 @@ class PluginPageTests(unittest.TestCase):
                 for node in nodes
             )
         )
+
+    def test_form_tv_add_actions_prepend_and_emit_pending_notice(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin({"enabled": True, "enable_tv": True, "enable_movie": False})
+
+        form, _ = plugin.get_form()
+        form_text = repr(form)
+
+        self.assertIn("ids.unshift(candidate)", form_text)
+        self.assertIn("tv_pending_notice", form_text)
+        self.assertIn("待保存新增", form_text)
 
     def test_form_candidates_ignore_tmdb_discover_noise(self):
         plugin_module = load_plugin_module()

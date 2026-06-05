@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.21"
+    plugin_version = "1.1.22"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -315,10 +315,17 @@ class NextReleaseTracker(_PluginBase):
                             add_model="tv_candidate_id",
                             season_model="tv_manual_season",
                             manual_season_model="manual_tv_seasons",
+                            notice_model="tv_pending_notice",
                         ),
                         add_aux_model="tv_manual_season",
                         add_aux_label="已追到第几季",
                         add_aux_placeholder="例如 2 或 S02",
+                        extra_content=[
+                            self._selection_notice_field(
+                                model="tv_pending_notice",
+                                label="待保存操作",
+                            )
+                        ],
                         post_table_content=[
                             {
                                 "component": "VAlert",
@@ -366,6 +373,7 @@ class NextReleaseTracker(_PluginBase):
                                                 tmdb_model="tv_season_edit_tmdb_id",
                                                 season_model="tv_season_edit_value",
                                                 manual_season_model="manual_tv_seasons",
+                                                notice_model="tv_pending_notice",
                                             ),
                                             "mt-md-6",
                                         ),
@@ -380,6 +388,7 @@ class NextReleaseTracker(_PluginBase):
                                                 tmdb_model="tv_season_edit_tmdb_id",
                                                 season_model="tv_season_edit_value",
                                                 manual_season_model="manual_tv_seasons",
+                                                notice_model="tv_pending_notice",
                                             ),
                                             "mt-md-6",
                                         ),
@@ -496,6 +505,7 @@ class NextReleaseTracker(_PluginBase):
             "movie_candidate_page": 1,
             "tv_candidate_id": "",
             "tv_manual_season": "",
+            "tv_pending_notice": "",
             "tv_season_edit_tmdb_id": "",
             "tv_season_edit_value": "",
             "tv_remove_id": "",
@@ -2542,7 +2552,11 @@ class NextReleaseTracker(_PluginBase):
                                 "移除这个编号",
                                 "warning",
                                 "mdi-minus",
-                                self._selection_remove_expr(model_key, remove_model),
+                                self._selection_remove_expr(
+                                    model_key,
+                                    remove_model,
+                                    notice_model="tv_pending_notice" if model_key == "tracked_tv_ids" else None,
+                                ),
                                 "mt-md-6",
                             ),
                         ),
@@ -2552,7 +2566,12 @@ class NextReleaseTracker(_PluginBase):
                                 "清空白名单",
                                 "error",
                                 "mdi-delete-outline",
-                                self._selection_clear_expr(model_key, add_model, remove_model),
+                                self._selection_clear_expr(
+                                    model_key,
+                                    add_model,
+                                    remove_model,
+                                    notice_model="tv_pending_notice" if model_key == "tracked_tv_ids" else None,
+                                ),
                                 "mt-md-6",
                             ),
                         ),
@@ -2904,6 +2923,14 @@ class NextReleaseTracker(_PluginBase):
         return "{{ (() => { " f"const ids = {parsed}; " "return ids.length === 0; " "})() }}"
 
     @classmethod
+    def _model_has_text_expr(cls, model_name: str) -> str:
+        return (
+            "{{ (() => { "
+            f"return String(model.{model_name} || '').trim().length > 0; "
+            "})() }}"
+        )
+
+    @classmethod
     def _selection_contains_expr(cls, model_key: str, tmdb_id: int) -> str:
         parsed = cls._selection_model_parse_js(model_key)
         return "{{ (() => { " f"const ids = {parsed}; " f"return ids.includes({int(tmdb_id)}); " "})() }}"
@@ -2929,20 +2956,27 @@ class NextReleaseTracker(_PluginBase):
         )
 
     @classmethod
-    def _selection_add_expr(cls, model_key: str, add_model: str) -> str:
+    def _selection_add_expr(
+        cls,
+        model_key: str,
+        add_model: str,
+        notice_model: Optional[str] = None,
+    ) -> str:
         parsed = cls._selection_model_parse_js(model_key)
+        notice_stmt = (
+            f"model.{notice_model} = `待保存新增：TMDB-${{candidate}}；当前表单共 ${{ids.length}} 项`; "
+            if notice_model
+            else ""
+        )
         return (
             "(event) => { "
             f"const candidate = Number(String(model.{add_model} || '').trim()); "
             "if (!Number.isInteger(candidate) || candidate <= 0) { return; } "
-            f"const ids = {parsed}; "
-            "if (!ids.includes(candidate)) { ids.push(candidate); } "
-            "model."
-            f"{model_key}"
-            " = ids.join('\\n'); "
-            "model."
-            f"{add_model}"
-            " = ''; "
+            f"const ids = {parsed}.filter((item) => item !== candidate); "
+            "ids.unshift(candidate); "
+            f"model.{model_key} = ids.join('\\n'); "
+            f"{notice_stmt}"
+            f"model.{add_model} = ''; "
             "}"
         )
 
@@ -2954,18 +2988,24 @@ class NextReleaseTracker(_PluginBase):
         add_model: str,
         season_model: str,
         manual_season_model: str,
+        notice_model: Optional[str] = None,
     ) -> str:
         parsed = cls._selection_model_parse_js(model_key)
         manual_seasons = cls._manual_tv_season_map_expr(manual_season_model)
         season_expr = cls._season_number_from_model_expr(season_model)
+        notice_stmt = (
+            f"model.{notice_model} = `待保存新增：TMDB-${{candidate}} / 已追到 S${{String(season).padStart(2, '0')}}；当前表单共 ${{ids.length}} 项`; "
+            if notice_model
+            else ""
+        )
         return (
             "(event) => { "
             f"const candidate = Number(String(model.{add_model} || '').trim()); "
             f"const season = {season_expr}; "
             "if (!Number.isInteger(candidate) || candidate <= 0) { return; } "
             "if (!Number.isInteger(season) || season <= 0) { return; } "
-            f"const ids = {parsed}; "
-            "if (!ids.includes(candidate)) { ids.push(candidate); } "
+            f"const ids = {parsed}.filter((item) => item !== candidate); "
+            "ids.unshift(candidate); "
             f"const mappings = {manual_seasons}; "
             "mappings[candidate] = season; "
             "const lines = Object.keys(mappings) "
@@ -2975,6 +3015,7 @@ class NextReleaseTracker(_PluginBase):
             ".map((key) => `${key}=${Number(mappings[key])}`); "
             f"model.{model_key} = ids.join('\\n'); "
             f"model.{manual_season_model} = lines.join('\\n'); "
+            f"{notice_stmt}"
             f"model.{add_model} = ''; "
             f"model.{season_model} = ''; "
             "}"
@@ -2988,10 +3029,16 @@ class NextReleaseTracker(_PluginBase):
         tmdb_model: str,
         season_model: str,
         manual_season_model: str,
+        notice_model: Optional[str] = None,
     ) -> str:
         parsed = cls._selection_model_parse_js(model_key)
         manual_seasons = cls._manual_tv_season_map_expr(manual_season_model)
         season_expr = cls._season_number_from_model_expr(season_model)
+        notice_stmt = (
+            f"model.{notice_model} = `待保存修改：TMDB-${{tmdbId}} / 已追到 S${{String(season).padStart(2, '0')}}`; "
+            if notice_model
+            else ""
+        )
         return (
             "(event) => { "
             f"const tmdbId = Number(String(model.{tmdb_model} || '').trim()); "
@@ -3008,6 +3055,7 @@ class NextReleaseTracker(_PluginBase):
             ".sort((left, right) => left - right) "
             ".map((key) => `${key}=${Number(mappings[key])}`); "
             f"model.{manual_season_model} = lines.join('\\n'); "
+            f"{notice_stmt}"
             f"model.{season_model} = ''; "
             "}"
         )
@@ -3019,8 +3067,14 @@ class NextReleaseTracker(_PluginBase):
         tmdb_model: str,
         season_model: str,
         manual_season_model: str,
+        notice_model: Optional[str] = None,
     ) -> str:
         manual_seasons = cls._manual_tv_season_map_expr(manual_season_model)
+        notice_stmt = (
+            f"model.{notice_model} = `待保存修改：TMDB-${{tmdbId}} / 已清除季数`; "
+            if notice_model
+            else ""
+        )
         return (
             "(event) => { "
             f"const tmdbId = Number(String(model.{tmdb_model} || '').trim()); "
@@ -3033,43 +3087,69 @@ class NextReleaseTracker(_PluginBase):
             ".sort((left, right) => left - right) "
             ".map((key) => `${key}=${Number(mappings[key])}`); "
             f"model.{manual_season_model} = lines.join('\\n'); "
+            f"{notice_stmt}"
             f"model.{season_model} = ''; "
             "}"
         )
 
     @classmethod
-    def _selection_add_fixed_expr(cls, model_key: str, tmdb_id: int) -> str:
+    def _selection_add_fixed_expr(
+        cls,
+        model_key: str,
+        tmdb_id: int,
+        notice_model: Optional[str] = None,
+    ) -> str:
         parsed = cls._selection_model_parse_js(model_key)
+        notice_stmt = (
+            f"model.{notice_model} = `待保存新增：TMDB-{int(tmdb_id)}；当前表单共 ${{ids.length}} 项`; "
+            if notice_model
+            else ""
+        )
         return (
             "(event) => { "
-            f"const ids = {parsed}; "
-            f"if (!ids.includes({int(tmdb_id)})) {{ ids.push({int(tmdb_id)}); }} "
+            f"const ids = {parsed}.filter((item) => item !== {int(tmdb_id)}); "
+            f"ids.unshift({int(tmdb_id)}); "
             f"model.{model_key} = ids.join('\\n'); "
+            f"{notice_stmt}"
             "}"
         )
 
     @classmethod
-    def _selection_remove_expr(cls, model_key: str, remove_model: str) -> str:
+    def _selection_remove_expr(
+        cls,
+        model_key: str,
+        remove_model: str,
+        notice_model: Optional[str] = None,
+    ) -> str:
         parsed = cls._selection_model_parse_js(model_key)
+        notice_stmt = (
+            f"model.{notice_model} = `待保存移除：TMDB-${{candidate}}；当前表单剩余 ${{ids.length}} 项`; "
+            if notice_model
+            else ""
+        )
         return (
             "(event) => { "
             f"const candidate = Number(String(model.{remove_model} || '').trim()); "
             "if (!Number.isInteger(candidate) || candidate <= 0) { return; } "
             f"const ids = {parsed}.filter((item) => item !== candidate); "
-            "model."
-            f"{model_key}"
-            " = ids.join('\\n'); "
-            "model."
-            f"{remove_model}"
-            " = ''; "
+            f"model.{model_key} = ids.join('\\n'); "
+            f"{notice_stmt}"
+            f"model.{remove_model} = ''; "
             "}"
         )
 
     @staticmethod
-    def _selection_clear_expr(model_key: str, add_model: str, remove_model: str) -> str:
+    def _selection_clear_expr(
+        model_key: str,
+        add_model: str,
+        remove_model: str,
+        notice_model: Optional[str] = None,
+    ) -> str:
+        notice_stmt = f"model.{notice_model} = '待保存：已清空名单'; " if notice_model else ""
         return (
             "(event) => { "
             f"model.{model_key} = ''; "
+            f"{notice_stmt}"
             f"model.{add_model} = ''; "
             f"model.{remove_model} = ''; "
             "}"
@@ -3555,7 +3635,11 @@ class NextReleaseTracker(_PluginBase):
                                     "size": "small",
                                     "prepend-icon": "mdi-plus",
                                     "disabled": self._selection_contains_expr(model_key, tmdb_id),
-                                    "onClick": self._selection_add_fixed_expr(model_key, tmdb_id),
+                                    "onClick": self._selection_add_fixed_expr(
+                                        model_key,
+                                        tmdb_id,
+                                        notice_model="tv_pending_notice" if model_key == "tracked_tv_ids" else None,
+                                    ),
                                 },
                                 "text": "加入白名单",
                             }
@@ -3695,6 +3779,19 @@ class NextReleaseTracker(_PluginBase):
                 "model": model,
                 "label": label,
                 "placeholder": placeholder,
+            },
+        }
+
+    @staticmethod
+    def _selection_notice_field(model: str, label: str) -> dict:
+        return {
+            "component": "VTextField",
+            "props": {
+                "model": model,
+                "label": label,
+                "readonly": True,
+                "hide-details": "auto",
+                "show": NextReleaseTracker._model_has_text_expr(model),
             },
         }
 
