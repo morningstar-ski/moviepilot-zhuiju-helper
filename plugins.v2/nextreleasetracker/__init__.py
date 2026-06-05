@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.16"
+    plugin_version = "1.1.17"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -1275,15 +1275,19 @@ class NextReleaseTracker(_PluginBase):
 
         if not detected_seasons:
             return
-        if notify_flag:
+        if notify_flag and available_seasons:
             self._notify_tv_release(
                 title=title,
                 year=year,
                 tmdb_id=tmdb_id,
-                seasons=detected_seasons,
-                status=status or "available",
+                seasons=available_seasons,
+                status="available",
             )
             summary["notifications_sent"] += 1
+            self._complete_tv_tracking(tmdb_id)
+            summary["tracks_completed"] += 1
+            return
+        if notify_flag:
             self._complete_tv_tracking(tmdb_id)
             summary["tracks_completed"] += 1
             return
@@ -1405,15 +1409,22 @@ class NextReleaseTracker(_PluginBase):
 
         if not detected_candidates:
             return
-        if notify_flag:
+        if notify_flag and available_candidates:
             self._notify_movie_release(
                 title=track.get("title") or f"TMDB-{track.get('anchor_tmdb_id')}",
                 anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
                 collection_id=collection_id,
-                candidates=detected_candidates,
-                status=status or "available",
+                candidates=available_candidates,
+                status="available",
             )
             summary["notifications_sent"] += 1
+            self._complete_movie_tracking(
+                track_key=track_key,
+                anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
+            )
+            summary["tracks_completed"] += 1
+            return
+        if notify_flag:
             self._complete_movie_tracking(
                 track_key=track_key,
                 anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
@@ -2127,7 +2138,7 @@ class NextReleaseTracker(_PluginBase):
         label = f"{title} ({year})" if year else title
         text = (
             f"{label} | TMDB {tmdb_id} | 新季 {season_text} | "
-            f"{self._release_status_text(status)} | 已结束本条追踪"
+            f"{self._tv_release_status_text(status)} | 已结束本条追踪"
         )
         self.post_message(mtype=NotificationType.Plugin, title="追剧助手", text=text)
 
@@ -2147,7 +2158,7 @@ class NextReleaseTracker(_PluginBase):
         collection_text = f" | Collection {collection_id}" if collection_id else ""
         text = (
             f"{title} | 锚点 TMDB {anchor_tmdb_id}{collection_text} | 续作 {candidate_text} | "
-            f"{self._release_status_text(status)} | 已结束本条追踪"
+            f"{self._movie_release_status_text(status)} | 已结束本条追踪"
         )
         self.post_message(mtype=NotificationType.Plugin, title="追剧助手", text=text)
 
@@ -2165,6 +2176,22 @@ class NextReleaseTracker(_PluginBase):
         if status == "subscription":
             return "已存在订阅"
         return "发现可处理的新条目"
+
+    @classmethod
+    def _tv_release_status_text(cls, status: str) -> str:
+        if status == "library":
+            return "发现追剧新季已在媒体库"
+        if status == "subscription":
+            return "发现追剧新季已在订阅中"
+        return "发现追剧新季已上线"
+
+    @classmethod
+    def _movie_release_status_text(cls, status: str) -> str:
+        if status == "library":
+            return "发现续作已在媒体库"
+        if status == "subscription":
+            return "发现续作已在订阅中"
+        return "发现续作已上映"
 
     @staticmethod
     def _parse_track_selection(value: Any) -> List[int]:

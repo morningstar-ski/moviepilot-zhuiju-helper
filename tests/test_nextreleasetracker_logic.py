@@ -623,7 +623,50 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual([], store.get_selected_tv_ids())
         self.assertEqual("", plugin._config["tracked_tv_ids"])
         self.assertIn("\u65b0\u5b63 S02", plugin._last_message["text"])
+        self.assertIn("\u53d1\u73b0\u8ffd\u5267\u65b0\u5b63\u5df2\u4e0a\u7ebf", plugin._last_message["text"])
         self.assertIn("\u5df2\u7ed3\u675f\u672c\u6761\u8ffd\u8e2a", plugin._last_message["text"])
+
+    def test_selected_tv_track_in_library_completes_without_notification(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": True,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "60625",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.acknowledge_tv_completion(
+            tmdb_id=60625,
+            title="Rick and Morty",
+            year="2013",
+            season=1,
+            source="manual",
+        )
+        plugin._tmdb_chain = types.SimpleNamespace(
+            tmdb_seasons=lambda tmdb_id: [
+                {"season_number": 2, "episode_count": 10, "air_date": "2026-06-01"},
+            ]
+        )
+        plugin.chain = types.SimpleNamespace(recognize_media=lambda **kwargs: types.SimpleNamespace())
+        plugin._media_server_chain = types.SimpleNamespace(
+            media_exists=lambda media: types.SimpleNamespace(seasons={2: list(range(1, 11))})
+        )
+        plugin._subscribe_exists = lambda **kwargs: False
+
+        summary = plugin._run_rescan(scope="tv", reason="test", notify=True)
+
+        self.assertTrue(summary["success"])
+        self.assertEqual(1, summary["tv_candidates"])
+        self.assertEqual(1, summary["existing_in_library"])
+        self.assertEqual(0, summary["notifications_sent"])
+        self.assertEqual(1, summary["tracks_completed"])
+        self.assertEqual({}, store.get_tv_tracks())
+        self.assertEqual([], plugin._selected_tv_ids)
+        self.assertFalse(hasattr(plugin, "_last_message"))
 
     def test_history_import_only_applies_to_selected_items(self):
         plugin_module = load_plugin_module()
@@ -1217,6 +1260,111 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual(1, summary["tracks_updated"])
         self.assertEqual([604], updated_track["pending_tmdb_ids"])
         self.assertEqual([603], plugin._selected_movie_ids)
+
+    def test_movie_rescan_with_notify_uses_movie_friendly_copy(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": True,
+                "enable_tv": False,
+                "enable_movie": True,
+                "tracked_movie_ids": "603",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.upsert_movie_track(
+            anchor_tmdb_id=603,
+            title="The Matrix",
+            year="1999",
+            source="manual",
+            collection_id=2344,
+        )
+        store.acknowledge_movie_completion(
+            track_key="collection:2344",
+            tmdb_id=603,
+            title="The Matrix",
+            year="1999",
+            collection_id=2344,
+            source="manual",
+        )
+        plugin._tmdb_chain = types.SimpleNamespace(
+            tmdb_collection=lambda collection_id: [
+                {
+                    "tmdb_id": 604,
+                    "title": "The Matrix Reloaded",
+                    "year": "2003",
+                    "release_date": "2026-06-01",
+                    "collection_id": 2344,
+                }
+            ]
+        )
+        plugin._media_server_chain = types.SimpleNamespace(media_exists=lambda media: None)
+        plugin._subscribe_exists = lambda **kwargs: False
+
+        summary = plugin._run_rescan(scope="movie", reason="test", notify=True)
+
+        self.assertTrue(summary["success"])
+        self.assertEqual(1, summary["movie_candidates"])
+        self.assertEqual(1, summary["notifications_sent"])
+        self.assertEqual(1, summary["tracks_completed"])
+        self.assertIn("\u7eed\u4f5c The Matrix Reloaded(2003)", plugin._last_message["text"])
+        self.assertIn("\u53d1\u73b0\u7eed\u4f5c\u5df2\u4e0a\u6620", plugin._last_message["text"])
+        self.assertIn("\u5df2\u7ed3\u675f\u672c\u6761\u8ffd\u8e2a", plugin._last_message["text"])
+
+    def test_movie_rescan_with_existing_subscription_completes_without_notification(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": True,
+                "enable_tv": False,
+                "enable_movie": True,
+                "tracked_movie_ids": "603",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.upsert_movie_track(
+            anchor_tmdb_id=603,
+            title="The Matrix",
+            year="1999",
+            source="manual",
+            collection_id=2344,
+        )
+        store.acknowledge_movie_completion(
+            track_key="collection:2344",
+            tmdb_id=603,
+            title="The Matrix",
+            year="1999",
+            collection_id=2344,
+            source="manual",
+        )
+        plugin._tmdb_chain = types.SimpleNamespace(
+            tmdb_collection=lambda collection_id: [
+                {
+                    "tmdb_id": 604,
+                    "title": "The Matrix Reloaded",
+                    "year": "2003",
+                    "release_date": "2026-06-01",
+                    "collection_id": 2344,
+                }
+            ]
+        )
+        plugin._media_server_chain = types.SimpleNamespace(media_exists=lambda media: None)
+        plugin._subscribe_exists = lambda **kwargs: True
+
+        summary = plugin._run_rescan(scope="movie", reason="test", notify=True)
+
+        self.assertTrue(summary["success"])
+        self.assertEqual(1, summary["movie_candidates"])
+        self.assertEqual(1, summary["existing_subscriptions"])
+        self.assertEqual(0, summary["notifications_sent"])
+        self.assertEqual(1, summary["tracks_completed"])
+        self.assertEqual({}, store.get_movie_tracks())
+        self.assertEqual([], plugin._selected_movie_ids)
+        self.assertFalse(hasattr(plugin, "_last_message"))
 
     def test_movie_track_remove_by_collection_cleans_manual_mapping(self):
         plugin_module = load_plugin_module()
