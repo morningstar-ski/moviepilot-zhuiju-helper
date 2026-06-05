@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import types
 import unittest
 import importlib.util
