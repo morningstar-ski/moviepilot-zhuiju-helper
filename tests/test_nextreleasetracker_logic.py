@@ -480,7 +480,7 @@ class PluginPageTests(unittest.TestCase):
         self.assertIn("60625", store.get_tv_tracks())
         self.assertIn(movie_track_key, store.get_movie_tracks())
 
-    def test_init_plugin_explicit_empty_selection_clears_existing_state_selection(self):
+    def test_init_plugin_explicit_empty_selection_keeps_existing_state_selection(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
         plugin._data[state.TrackerStateStore.KEY_SELECTED_TV_IDS] = [60625]
@@ -496,12 +496,12 @@ class PluginPageTests(unittest.TestCase):
         )
 
         store = plugin._ensure_state_store()
-        self.assertEqual([], plugin._selected_tv_ids)
-        self.assertEqual([], plugin._selected_movie_ids)
-        self.assertEqual([], store.get_selected_tv_ids())
-        self.assertEqual([], store.get_selected_movie_ids())
-        self.assertEqual("", plugin._config["tracked_tv_ids"])
-        self.assertEqual("", plugin._config["tracked_movie_ids"])
+        self.assertEqual([60625], plugin._selected_tv_ids)
+        self.assertEqual([550], plugin._selected_movie_ids)
+        self.assertEqual([60625], store.get_selected_tv_ids())
+        self.assertEqual([550], store.get_selected_movie_ids())
+        self.assertEqual("60625", plugin._config["tracked_tv_ids"])
+        self.assertEqual("550", plugin._config["tracked_movie_ids"])
 
     def test_init_plugin_with_explicit_empty_selection_still_cleans_stale_tracks(self):
         plugin_module = load_plugin_module()
@@ -713,10 +713,10 @@ class PluginPageTests(unittest.TestCase):
             )
         )
 
-    def test_form_section_show_expressions_use_model_scope(self):
+    def test_form_selection_sections_are_not_hidden_by_mode_switches(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
-        plugin.init_plugin({"enabled": True, "enable_tv": True, "enable_movie": True})
+        plugin.init_plugin({"enabled": True, "enable_tv": True, "enable_movie": False})
 
         form, _ = plugin.get_form()
         show_values = [
@@ -725,10 +725,13 @@ class PluginPageTests(unittest.TestCase):
             if node.get("component") == "VCard" and "show" in (node.get("props") or {})
         ]
 
-        self.assertIn("{{ model.enable_tv !== false }}", show_values)
-        self.assertIn("{{ model.enable_movie !== false }}", show_values)
+        self.assertNotIn("{{ model.enable_tv !== false }}", show_values)
+        self.assertNotIn("{{ model.enable_movie !== false }}", show_values)
         self.assertNotIn("{{ enable_tv }}", show_values)
         self.assertNotIn("{{ enable_movie }}", show_values)
+        form_text = repr(form)
+        self.assertIn("\u641c\u7d22\u5267\u96c6\u5019\u9009\u5217\u8868", form_text)
+        self.assertIn("\u641c\u7d22\u7535\u5f71\u5019\u9009\u5217\u8868", form_text)
         self.assertFalse(any(node.get("component") == "VSheet" for node in iter_component_nodes(form)))
 
     def test_candidate_lookup_dedupes_and_sorts_by_recent_time(self):

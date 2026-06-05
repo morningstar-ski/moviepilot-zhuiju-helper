@@ -48,7 +48,7 @@ class NextReleaseTracker(_PluginBase):
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.15"
+    plugin_version = "1.1.16"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -299,7 +299,6 @@ class NextReleaseTracker(_PluginBase):
                             candidates=tv_candidates,
                         ),
                         candidates=tv_candidates,
-                        show_expr="{{ model.enable_tv !== false }}",
                     ),
                     self._form_selection_editor(
                         title="电影追更名单",
@@ -321,7 +320,6 @@ class NextReleaseTracker(_PluginBase):
                             candidates=movie_candidates,
                         ),
                         candidates=movie_candidates,
-                        show_expr="{{ model.enable_movie !== false }}",
                     ),
                     self._form_section_card(
                         title="高级设置（一般不用动）",
@@ -1902,13 +1900,15 @@ class NextReleaseTracker(_PluginBase):
     def _restore_selected_track_state(self, config: Dict[str, Any], normalized_config: Dict[str, Any]) -> None:
         store = self._ensure_state_store()
         config_has_selection_keys = "tracked_tv_ids" in config or "tracked_movie_ids" in config
+        stored_tv_ids = store.get_selected_tv_ids() if store.has_selected_track_ids() else []
+        stored_movie_ids = store.get_selected_movie_ids() if store.has_selected_track_ids() else []
+        recovered_tv_ids, recovered_movie_ids = self._recover_selected_track_ids_from_tracks()
         if config_has_selection_keys:
-            self._selected_tv_ids = self._parse_track_selection(normalized_config["tracked_tv_ids"])
-            self._selected_movie_ids = self._parse_track_selection(normalized_config["tracked_movie_ids"])
+            config_tv_ids = self._parse_track_selection(normalized_config["tracked_tv_ids"])
+            config_movie_ids = self._parse_track_selection(normalized_config["tracked_movie_ids"])
+            self._selected_tv_ids = config_tv_ids or stored_tv_ids
+            self._selected_movie_ids = config_movie_ids or stored_movie_ids
         else:
-            stored_tv_ids = store.get_selected_tv_ids() if store.has_selected_track_ids() else []
-            stored_movie_ids = store.get_selected_movie_ids() if store.has_selected_track_ids() else []
-            recovered_tv_ids, recovered_movie_ids = self._recover_selected_track_ids_from_tracks()
             self._selected_tv_ids = stored_tv_ids or recovered_tv_ids
             self._selected_movie_ids = stored_movie_ids or recovered_movie_ids
         self._persist_selected_track_state()
@@ -2240,7 +2240,7 @@ class NextReleaseTracker(_PluginBase):
         saved_summary: dict,
         saved_table: dict,
         candidates: List[Dict[str, Any]],
-        show_expr: str,
+        show_expr: Optional[str] = None,
     ) -> dict:
         candidate_content: List[dict] = [
             {
