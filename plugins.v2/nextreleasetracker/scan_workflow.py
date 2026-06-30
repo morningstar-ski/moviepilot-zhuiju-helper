@@ -42,6 +42,10 @@ class NextReleaseTrackerScanMixin:
     def _run_rescan(self, *, scope: str, reason: str, notify: Optional[bool]) -> Dict[str, Any]:
         scope = scope if scope in {"all", "tv", "movie"} else "all"
         if not self._scan_lock.acquire(blocking=False):
+            self._record_cycle_stat(
+                locked_skip_increment=1,
+                last_locked_skip_at=self._now(),
+            )
             return {
                 "success": False,
                 "message": "scan is already running",
@@ -87,6 +91,7 @@ class NextReleaseTrackerScanMixin:
                 "last_scan_reason": reason,
             }
         )
+        self._record_cycle_stat(tick_increment=1)
 
         processed_task_ids: List[str] = []
         try:
@@ -138,8 +143,28 @@ class NextReleaseTrackerScanMixin:
             summary["tmdb_calls_used"] = tmdb_budget["used"] - tmdb_budget["used_before"]
             summary["remaining_tracks"] = self._remaining_scan_tasks(task_plan, processed_task_ids)
             summary["finished_at"] = self._now()
+            if reason == "cron_tick" and not summary["planned_tracks"] and not summary["errors"] and not summary["budget_exhausted"]:
+                self._record_cycle_stat(idle_tick_increment=1)
+                self._log(
+                    "info",
+                    "cron_idle",
+                    "Cron tick reached with no due tasks in the current cycle.",
+                    {
+                        "scope": scope,
+                        "reason": reason,
+                        "remaining_tracks": summary["remaining_tracks"],
+                        "period_minutes": summary["period_minutes"],
+                    },
+                )
             runtime_patch = {}
-            if reason != "cron_tick" or summary["planned_tracks"] or summary["errors"] or summary["budget_exhausted"]:
+            if (
+                reason != "cron_tick"
+                or summary["planned_tracks"]
+                or summary["errors"]
+                or summary["budget_exhausted"]
+                or task_plan.get("cycle_reset")
+                or not summary["planned_tracks"]
+            ):
                 runtime_patch["last_scan_finished_at"] = summary["finished_at"]
                 runtime_patch["last_scan_summary"] = summary
             if runtime_patch:
@@ -257,20 +282,60 @@ class NextReleaseTrackerScanMixin:
         if not detected_seasons:
             return
         if notify_flag and available_seasons:
-            self._notify_tv_release(
+            target_season = min(available_seasons)
+            self._log(
+                "info",
+                "auto_subscribe_decision",
+                f"Selected season {target_season} for automatic subscribe.",
+                {
+                    "media_type": MediaType.TV.value,
+                    "tmdb_id": tmdb_id,
+                    "candidates": available_seasons,
+                    "selected": target_season,
+                    "reason": "earliest_available_season",
+                },
+            )
+            if self._auto_subscribe(
                 title=title,
                 year=year,
+                mtype=MediaType.TV,
                 tmdb_id=tmdb_id,
-                seasons=available_seasons,
-                status="available",
+                season=target_season,
+            ):
+                self._notify_tv_release(
+                    title=title,
+                    year=year,
+                    tmdb_id=tmdb_id,
+                    seasons=[target_season],
+                    status="available",
+                    auto_subscribed=True,
+                )
+                summary["notifications_sent"] += 1
+                self._record_cycle_stat(
+                    active_tick_increment=1,
+                    processed_task_increment=1,
+                    last_active_tick_at=self._now(),
+                )
+                self._complete_tv_tracking(tmdb_id)
+                summary["tracks_completed"] += 1
+                return
+            for season in available_seasons:
+                self._ensure_state_store().mark_tv_pending(tmdb_id, season)
+            summary["tracks_updated"] += 1
+            self._record_cycle_stat(
+                active_tick_increment=1,
+                processed_task_increment=1,
+                last_active_tick_at=self._now(),
             )
-            summary["notifications_sent"] += 1
-            self._complete_tv_tracking(tmdb_id)
-            summary["tracks_completed"] += 1
             return
         if notify_flag:
             self._complete_tv_tracking(tmdb_id)
             summary["tracks_completed"] += 1
+            self._record_cycle_stat(
+                active_tick_increment=1,
+                processed_task_increment=1,
+                last_active_tick_at=self._now(),
+            )
             return
 
         if available_seasons:
@@ -292,10 +357,20 @@ class NextReleaseTrackerScanMixin:
             for season in available_seasons:
                 self._ensure_state_store().mark_tv_pending(tmdb_id, season)
             summary["tracks_updated"] += 1
+            self._record_cycle_stat(
+                active_tick_increment=1,
+                processed_task_increment=1,
+                last_active_tick_at=self._now(),
+            )
             return
 
         self._complete_tv_tracking(tmdb_id)
         summary["tracks_completed"] += 1
+        self._record_cycle_stat(
+            active_tick_increment=1,
+            processed_task_increment=1,
+            last_active_tick_at=self._now(),
+        )
 
     def _process_movie_scan_task(
         self,
@@ -391,19 +466,53 @@ class NextReleaseTrackerScanMixin:
         if not detected_candidates:
             return
         if notify_flag and available_candidates:
-            self._notify_movie_release(
-                title=track.get("title") or f"TMDB-{track.get('anchor_tmdb_id')}",
-                anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
-                collection_id=collection_id,
-                candidates=available_candidates,
-                status="available",
+            target_candidate = available_candidates[0]
+            self._log(
+                "info",
+                "auto_subscribe_decision",
+                f"Selected movie {target_candidate.tmdb_id} for automatic subscribe.",
+                {
+                    "media_type": MediaType.MOVIE.value,
+                    "anchor_tmdb_id": coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
+                    "candidates": [candidate.tmdb_id for candidate in available_candidates],
+                    "selected": target_candidate.tmdb_id,
+                    "reason": "first_available_candidate",
+                },
             )
-            summary["notifications_sent"] += 1
-            self._complete_movie_tracking(
-                track_key=track_key,
-                anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
+            if self._auto_subscribe(
+                title=target_candidate.title or track.get("title") or f"TMDB-{target_candidate.tmdb_id}",
+                year=target_candidate.year,
+                mtype=MediaType.MOVIE,
+                tmdb_id=target_candidate.tmdb_id,
+            ):
+                self._notify_movie_release(
+                    title=track.get("title") or f"TMDB-{track.get('anchor_tmdb_id')}",
+                    anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
+                    collection_id=collection_id,
+                    candidates=[target_candidate],
+                    status="available",
+                    auto_subscribed=True,
+                )
+                summary["notifications_sent"] += 1
+                self._record_cycle_stat(
+                    active_tick_increment=1,
+                    processed_task_increment=1,
+                    last_active_tick_at=self._now(),
+                )
+                self._complete_movie_tracking(
+                    track_key=track_key,
+                    anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
+                )
+                summary["tracks_completed"] += 1
+                return
+            for candidate in available_candidates:
+                self._ensure_state_store().mark_movie_pending(track_key, candidate.tmdb_id)
+            summary["tracks_updated"] += 1
+            self._record_cycle_stat(
+                active_tick_increment=1,
+                processed_task_increment=1,
+                last_active_tick_at=self._now(),
             )
-            summary["tracks_completed"] += 1
             return
         if notify_flag:
             self._complete_movie_tracking(
@@ -411,6 +520,11 @@ class NextReleaseTrackerScanMixin:
                 anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
             )
             summary["tracks_completed"] += 1
+            self._record_cycle_stat(
+                active_tick_increment=1,
+                processed_task_increment=1,
+                last_active_tick_at=self._now(),
+            )
             return
 
         if available_candidates:
@@ -428,6 +542,11 @@ class NextReleaseTrackerScanMixin:
             for candidate in available_candidates:
                 self._ensure_state_store().mark_movie_pending(current_track_key, candidate.tmdb_id)
             summary["tracks_updated"] += 1
+            self._record_cycle_stat(
+                active_tick_increment=1,
+                processed_task_increment=1,
+                last_active_tick_at=self._now(),
+            )
             return
 
         self._complete_movie_tracking(
@@ -435,6 +554,11 @@ class NextReleaseTrackerScanMixin:
             anchor_tmdb_id=coerce_int(track.get("anchor_tmdb_id"), 0) or 0,
         )
         summary["tracks_completed"] += 1
+        self._record_cycle_stat(
+            active_tick_increment=1,
+            processed_task_increment=1,
+            last_active_tick_at=self._now(),
+        )
 
     def _resolve_scan_task_plan(self, *, scope: str, reason: str) -> Dict[str, Any]:
         task_list = self._build_scan_tasks(scope)
@@ -471,6 +595,7 @@ class NextReleaseTrackerScanMixin:
 
         if reset_cycle:
             pending_task_ids = list(current_task_ids)
+            store.clear_action_log()
             plan_state = {
                 "cron": self._cron,
                 "scope": scope,
@@ -479,6 +604,20 @@ class NextReleaseTrackerScanMixin:
                 "task_ids": list(current_task_ids),
                 "pending_task_ids": list(pending_task_ids),
             }
+            store.update_runtime(
+                {
+                    "current_cycle_stats": {
+                        "cycle_started_at": plan_state["cycle_started_at"],
+                        "tick_count": 0,
+                        "idle_tick_count": 0,
+                        "active_tick_count": 0,
+                        "processed_task_count": 0,
+                        "locked_skip_count": 0,
+                        "last_active_tick_at": None,
+                        "last_locked_skip_at": None,
+                    }
+                }
+            )
         else:
             stored_plan = runtime.get("scan_plan") or {}
             previous_task_ids = set(stored_plan.get("task_ids") or [])
@@ -503,6 +642,7 @@ class NextReleaseTrackerScanMixin:
             }
 
         started_at = self._parse_runtime_datetime(plan_state.get("cycle_started_at")) or now
+        store.prune_action_log_before(plan_state.get("cycle_started_at"))
         total_tasks = len(current_task_ids)
         processed_tasks = max(total_tasks - len(plan_state["pending_task_ids"]), 0)
         elapsed_minutes = max(int((now - started_at).total_seconds() // 60), 0)
@@ -521,7 +661,44 @@ class NextReleaseTrackerScanMixin:
             "task_map": task_map,
             "remaining_before": len(plan_state["pending_task_ids"]),
             "plan_state": plan_state,
+            "cycle_reset": reset_cycle,
         }
+
+    def _record_cycle_stat(
+        self,
+        *,
+        tick_increment: int = 0,
+        idle_tick_increment: int = 0,
+        active_tick_increment: int = 0,
+        processed_task_increment: int = 0,
+        locked_skip_increment: int = 0,
+        last_active_tick_at: Optional[str] = None,
+        last_locked_skip_at: Optional[str] = None,
+    ) -> None:
+        store = self._ensure_state_store()
+        runtime = store.get_runtime_state()
+        stats = dict(runtime.get("current_cycle_stats") or {})
+        if not stats:
+            stats = {
+                "cycle_started_at": self._now(),
+                "tick_count": 0,
+                "idle_tick_count": 0,
+                "active_tick_count": 0,
+                "processed_task_count": 0,
+                "locked_skip_count": 0,
+                "last_active_tick_at": None,
+                "last_locked_skip_at": None,
+            }
+        stats["tick_count"] = max(coerce_int(stats.get("tick_count"), 0) or 0, 0) + tick_increment
+        stats["idle_tick_count"] = max(coerce_int(stats.get("idle_tick_count"), 0) or 0, 0) + idle_tick_increment
+        stats["active_tick_count"] = max(coerce_int(stats.get("active_tick_count"), 0) or 0, 0) + active_tick_increment
+        stats["processed_task_count"] = max(coerce_int(stats.get("processed_task_count"), 0) or 0, 0) + processed_task_increment
+        stats["locked_skip_count"] = max(coerce_int(stats.get("locked_skip_count"), 0) or 0, 0) + locked_skip_increment
+        if last_active_tick_at:
+            stats["last_active_tick_at"] = last_active_tick_at
+        if last_locked_skip_at:
+            stats["last_locked_skip_at"] = last_locked_skip_at
+        store.update_runtime({"current_cycle_stats": stats})
 
     def _build_scan_tasks(self, scope: str) -> List[Dict[str, Any]]:
         groups: List[List[Dict[str, Any]]] = []

@@ -21,6 +21,12 @@ class NextReleaseTrackerApiMixin:
                 "summary": "Get tracker state",
             },
             {
+                "path": "/automation/health",
+                "endpoint": self.api_automation_health,
+                "methods": ["GET"],
+                "summary": "Get automation health summary",
+            },
+            {
                 "path": "/rescan",
                 "endpoint": self.api_rescan,
                 "methods": ["POST"],
@@ -66,6 +72,62 @@ class NextReleaseTrackerApiMixin:
 
     def api_tracks(self) -> Dict[str, Any]:
         return self._ok("tracker state loaded", self._ensure_state_store().snapshot())
+
+    def api_automation_health(self) -> Dict[str, Any]:
+        runtime = self._ensure_state_store().get_runtime_state()
+        scan_plan = runtime.get("scan_plan") or {}
+        cycle_stats = runtime.get("current_cycle_stats") or {}
+        last_scan = runtime.get("last_scan_summary") or {}
+        rate_limit = runtime.get("tmdb_rate_limit") or {}
+
+        planned_task_ids = scan_plan.get("task_ids") or []
+        pending_task_ids = scan_plan.get("pending_task_ids") or []
+        health = {
+            "scheduler": {
+                "minute_tick_cron": getattr(self, "SCAN_TICK_CRON", "* * * * *"),
+                "configured_cycle_cron": getattr(self, "_cron", None),
+                "plugin_enabled": bool(getattr(self, "_enabled", False)),
+                "tv_enabled": bool(getattr(self, "_enable_tv", False)),
+                "movie_enabled": bool(getattr(self, "_enable_movie", False)),
+                "notify_enabled": bool(getattr(self, "_notify", False)),
+                "run_once_pending": bool(getattr(self, "_onlyonce", False)),
+            },
+            "runtime": {
+                "last_scan_started_at": runtime.get("last_scan_started_at"),
+                "last_scan_finished_at": runtime.get("last_scan_finished_at"),
+                "last_scan_scope": runtime.get("last_scan_scope"),
+                "last_scan_reason": runtime.get("last_scan_reason"),
+                "last_scan_success": last_scan.get("success"),
+                "last_scan_errors": last_scan.get("errors"),
+                "last_scan_planned_tracks": last_scan.get("planned_tracks"),
+                "last_scan_remaining_tracks": last_scan.get("remaining_tracks"),
+                "last_scan_budget_exhausted": last_scan.get("budget_exhausted"),
+            },
+            "cycle": {
+                "cycle_started_at": cycle_stats.get("cycle_started_at"),
+                "tick_count": cycle_stats.get("tick_count"),
+                "idle_tick_count": cycle_stats.get("idle_tick_count"),
+                "active_tick_count": cycle_stats.get("active_tick_count"),
+                "processed_task_count": cycle_stats.get("processed_task_count"),
+                "locked_skip_count": cycle_stats.get("locked_skip_count"),
+                "last_active_tick_at": cycle_stats.get("last_active_tick_at"),
+                "last_locked_skip_at": cycle_stats.get("last_locked_skip_at"),
+            },
+            "plan": {
+                "scope": scan_plan.get("scope"),
+                "cycle_started_at": scan_plan.get("cycle_started_at"),
+                "period_minutes": scan_plan.get("period_minutes"),
+                "planned_task_count": len(planned_task_ids),
+                "pending_task_count": len(pending_task_ids),
+                "next_due_task_id": pending_task_ids[0] if pending_task_ids else None,
+            },
+            "tmdb_rate_limit": {
+                "limit": rate_limit.get("limit", getattr(self, "_max_tmdb_calls_per_minute", None)),
+                "used": rate_limit.get("used"),
+                "window_started_at": rate_limit.get("window_started_at"),
+            },
+        }
+        return self._ok("automation health loaded", health)
 
     def api_rescan(self, payload: Optional[dict] = Body(default=None)) -> Dict[str, Any]:
         payload = payload or {}

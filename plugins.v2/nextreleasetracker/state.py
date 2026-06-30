@@ -97,6 +97,30 @@ class TrackerStateStore:
     def get_action_log(self) -> list[dict]:
         return self._load(self.KEY_ACTION_LOG, [])
 
+    def clear_action_log(self) -> None:
+        with self._lock:
+            self._save(self.KEY_ACTION_LOG, [])
+
+    def prune_action_log_before(self, started_at: Optional[str]) -> None:
+        if not started_at:
+            return
+        try:
+            threshold = datetime.strptime(str(started_at), "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            logs = self.get_action_log()
+            filtered = []
+            for entry in logs:
+                try:
+                    entry_time = datetime.strptime(str(entry.get("time") or ""), "%Y-%m-%d %H:%M:%S")
+                except (TypeError, ValueError):
+                    continue
+                if entry_time >= threshold:
+                    filtered.append(entry)
+            if len(filtered) != len(logs):
+                self._save(self.KEY_ACTION_LOG, filtered[-self._log_limit :])
+
     def get_runtime_state(self) -> dict:
         return self._load(self.KEY_RUNTIME_STATE, {})
 

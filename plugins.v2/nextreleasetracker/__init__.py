@@ -56,7 +56,7 @@ class NextReleaseTracker(
         "只追你明确加入名单的剧集和电影；按设定周期均摊检查量，发现新一季或同系列下一部后提醒一次。"
     )
     plugin_icon = "nextreleasetracker.png"
-    plugin_version = "1.1.24"
+    plugin_version = "1.1.25"
     plugin_author = "morningstar-ski"
     author_url = "https://github.com/morningstar-ski"
     plugin_config_prefix = "nextreleasetracker_"
@@ -65,7 +65,7 @@ class NextReleaseTracker(
     diagnostic_tv_tmdb_id = 9900001
     diagnostic_tv_title = "NRT Diagnostic Series"
     FORM_CANDIDATE_LIMIT = 120
-    FORM_CANDIDATE_PAGE_SIZE = 24
+    FORM_CANDIDATE_PAGE_SIZE = 15
     SELECTED_TRACK_PAGE_SIZE = 10
     DEFAULT_CRON = "0 3 * * 1"
     MAX_TMDB_CALLS_PER_MINUTE_CAP = 5
@@ -202,17 +202,6 @@ class NextReleaseTracker(
                         subtitle="先打开插件，再设置希望多久完成一轮检查。插件会按这个周期把名单均摊到每分钟执行，不会在某一个时刻一次性扫完整个名单。",
                         content=[
                             {
-                                "component": "VAlert",
-                                "props": {
-                                    "type": "success",
-                                    "variant": "tonal",
-                                    "text": (
-                                        f"当前已加入：剧集 {len(self._selected_tv_ids)} 项 / 电影 {len(self._selected_movie_ids)} 项；"
-                                        f"正在追踪：剧集 {len(tv_tracks)} 条 / 电影 {len(movie_tracks)} 条。"
-                                    ),
-                                },
-                            },
-                            {
                                 "component": "VRow",
                                 "content": [
                                     self._col(3, self._switch("enabled", "启用插件")),
@@ -245,7 +234,7 @@ class NextReleaseTracker(
                     ),
                     self._form_selection_editor(
                         title="剧集追更名单",
-                        subtitle="在这里添加你想继续追的剧。加入后，插件会优先用本地入库记录和订阅记录判断你已经追到哪一季；如果现在已经到第二季，后面只会留意第三季，不会回头提示第一季。可以直接搜剧名后加入，不需要自己查复杂编号。",
+                        subtitle="添加想继续追的剧。插件会结合本地记录判断你已追到哪一季，后续只关注更新；可直接搜索剧名加入。",
                         media_label="剧集",
                         model_key="tracked_tv_ids",
                         add_model="tv_candidate_id",
@@ -253,12 +242,6 @@ class NextReleaseTracker(
                         search_model="tv_candidate_search_text",
                         page_model="tv_candidate_page",
                         placeholder="60625",
-                        saved_summary=self._selection_snapshot_alert(
-                            "剧集",
-                            self._selected_tv_ids,
-                            tv_tracks,
-                            False,
-                        ),
                         saved_table=self._selection_current_table_live(
                             media_label="剧集",
                             model_key="tracked_tv_ids",
@@ -367,12 +350,6 @@ class NextReleaseTracker(
                         search_model="movie_candidate_search_text",
                         page_model="movie_candidate_page",
                         placeholder="550",
-                        saved_summary=self._selection_snapshot_alert(
-                            "电影",
-                            self._selected_movie_ids,
-                            movie_tracks,
-                            True,
-                        ),
                         saved_table=self._selection_current_table_live(
                             media_label="电影",
                             model_key="tracked_movie_ids",
@@ -484,6 +461,7 @@ class NextReleaseTracker(
         logs = list(reversed(state.get(TrackerStateStore.KEY_ACTION_LOG, [])))[:20]
         runtime = state.get(TrackerStateStore.KEY_RUNTIME_STATE, {})
         scan_plan = runtime.get("scan_plan") or {}
+        cycle_stats = runtime.get("current_cycle_stats") or {}
         tmdb_rate_limit = runtime.get("tmdb_rate_limit") or {}
         last_scan = runtime.get("last_scan_summary") or {}
         last_history = runtime.get("last_history_import") or {}
@@ -561,7 +539,7 @@ class NextReleaseTracker(
                                 f"当前模式：{plugin_mode} | 均摊周期：{self._cron or '未配置'} | "
                                 f"分钟上限：{self._max_tmdb_calls_per_minute} 次 TMDB 调用 | "
                                 f"通知：{'开启' if self._notify else '关闭'} | "
-                                f"已加入名单：{selected_total} 项 | 正在追踪：{active_total} 条"
+                                f"已加入名单：{selected_total} 项"
                             ) if self._enabled else (
                                 "插件当前未启用。你现在还能手动重扫或清理列表，但自动盯更新暂时不会运行。"
                             ),
@@ -572,7 +550,6 @@ class NextReleaseTracker(
                         "props": {"class": "nrt-summary"},
                         "content": [
                             self._stat_card("已加入名单", selected_total, f"剧集 {selected_tv_count} / 电影 {selected_movie_count}"),
-                            self._stat_card("追踪中条目", active_total, f"剧集 {len(tv_tracks)} / 电影 {len(movie_tracks)}"),
                             self._stat_card("待处理候选", pending_total, f"新季 {tv_pending} / 续作 {movie_pending}"),
                             self._stat_card("最近扫描通知", last_scan.get("notifications_sent", 0), f"本轮结束 {last_scan.get('tracks_completed', 0)} 条"),
                         ],
@@ -596,6 +573,13 @@ class NextReleaseTracker(
                                     ["扫描来源", scan_reason],
                                     ["当前周期", self._cron or "-"],
                                     ["当前周期剩余", f"{len(scan_plan.get('pending_task_ids') or [])} / {len(scan_plan.get('task_ids') or []) or 0}"],
+                                    ["本周期 tick 次数", coerce_int(cycle_stats.get("tick_count"), 0) or 0],
+                                    ["本周期空跑次数", coerce_int(cycle_stats.get("idle_tick_count"), 0) or 0],
+                                    ["本周期活跃次数", coerce_int(cycle_stats.get("active_tick_count"), 0) or 0],
+                                    ["本周期处理任务数", coerce_int(cycle_stats.get("processed_task_count"), 0) or 0],
+                                    ["本周期锁冲突跳过", coerce_int(cycle_stats.get("locked_skip_count"), 0) or 0],
+                                    ["最近活跃 tick", cycle_stats.get("last_active_tick_at") or "-"],
+                                    ["最近锁冲突", cycle_stats.get("last_locked_skip_at") or "-"],
                                     ["本分钟已用", f"{coerce_int(tmdb_rate_limit.get('used'), 0) or 0} / {self._max_tmdb_calls_per_minute}"],
                                     ["发送通知", last_scan.get("notifications_sent", 0)],
                                     ["结束追踪", last_scan.get("tracks_completed", 0)],
@@ -625,65 +609,6 @@ class NextReleaseTracker(
                                 ["标题", "TMDB", "状态", "当前进度", "操作"],
                                 selected_movie_rows,
                                 empty_text="你还没把任何电影加入追更名单。去配置页搜索后加入，这里就会显示。",
-                            )
-                        ],
-                    ),
-                    self._section_card(
-                        "当前追踪中的剧集",
-                        [
-                            self._simple_table(
-                                ["剧名", "TMDB", "最新季", "待处理季", "来源", "更新时间", "操作"],
-                                [
-                                    [
-                                        track.get("title") or f"TMDB-{track.get('tmdb_id')}",
-                                        track.get("tmdb_id"),
-                                        track.get("latest_season"),
-                                        self._join_values(track.get("pending_seasons")),
-                                        track.get("source") or "-",
-                                        track.get("updated_at") or track.get("added_at") or "-",
-                                        self._page_track_remove_button(MediaType.TV.value, coerce_int(track.get("tmdb_id"))),
-                                    ]
-                                    for track in sorted(
-                                        tv_tracks.values(),
-                                        key=lambda item: (
-                                            str(item.get("title") or ""),
-                                            coerce_int(item.get("tmdb_id"), 0) or 0,
-                                        ),
-                                    )
-                                ],
-                                empty_text="暂无剧集追踪项。",
-                            )
-                        ],
-                    ),
-                    self._section_card(
-                        "当前追踪中的电影",
-                        [
-                            self._simple_table(
-                                ["标题", "锚点 TMDB", "Collection", "已知条目", "待处理条目", "来源", "更新时间", "操作"],
-                                [
-                                    [
-                                        track.get("title") or f"TMDB-{track.get('anchor_tmdb_id')}",
-                                        track.get("anchor_tmdb_id"),
-                                        track.get("collection_id") or "-",
-                                        len(track.get("known_tmdb_ids") or []),
-                                        self._join_values(track.get("pending_tmdb_ids")),
-                                        track.get("source") or "-",
-                                        track.get("updated_at") or track.get("added_at") or "-",
-                                        self._page_track_remove_button(
-                                            MediaType.MOVIE.value,
-                                            coerce_int(track.get("anchor_tmdb_id")),
-                                            coerce_int(track.get("collection_id")),
-                                        ),
-                                    ]
-                                    for track in sorted(
-                                        movie_tracks.values(),
-                                        key=lambda item: (
-                                            str(item.get("title") or ""),
-                                            str(item.get("track_key") or ""),
-                                        ),
-                                    )
-                                ],
-                                empty_text="暂无电影追踪项。",
                             )
                         ],
                     ),
@@ -821,6 +746,9 @@ class NextReleaseTracker(
 
     def api_tracks(self) -> Dict[str, Any]:
         return NextReleaseTrackerApiMixin.api_tracks(self)
+
+    def api_automation_health(self) -> Dict[str, Any]:
+        return NextReleaseTrackerApiMixin.api_automation_health(self)
 
     def api_rescan(self, payload: Optional[dict] = Body(default=None)) -> Dict[str, Any]:
         return NextReleaseTrackerApiMixin.api_rescan(self, payload)
@@ -1137,6 +1065,13 @@ class NextReleaseTracker(
             tracked_tv_ids.insert(0, int(transient_edit_tmdb_id))
             manual_tv_seasons[int(transient_edit_tmdb_id)] = int(transient_edit_season)
 
+        tracked_tv_id_set = set(tracked_tv_ids)
+        manual_tv_seasons = {
+            tmdb_id: season
+            for tmdb_id, season in manual_tv_seasons.items()
+            if tmdb_id in tracked_tv_id_set and season > 0
+        }
+
         return {
             "enabled": self._coerce_bool(config.get("enabled"), False),
             "notify": self._coerce_bool(config.get("notify"), True),
@@ -1424,12 +1359,13 @@ class NextReleaseTracker(
         tmdb_id: int,
         seasons: List[int],
         status: str,
+        auto_subscribed: bool = False,
     ) -> None:
         season_text = ", ".join(f"S{int(season):02d}" for season in normalize_tmdb_id_list(seasons))
         label = f"{title} ({year})" if year else title
         text = (
             f"{label} | TMDB {tmdb_id} | 新季 {season_text} | "
-            f"{self._tv_release_status_text(status)} | 已结束本条追踪"
+            f"{self._tv_release_status_text(status, auto_subscribed=auto_subscribed)} | 已结束本条追踪"
         )
         self.post_message(mtype=NotificationType.Plugin, title="追剧助手", text=text)
 
@@ -1441,6 +1377,7 @@ class NextReleaseTracker(
         collection_id: Optional[int],
         candidates: List[Any],
         status: str,
+        auto_subscribed: bool = False,
     ) -> None:
         candidate_text = ", ".join(
             f"{candidate.title}({candidate.year or '-'})"
@@ -1449,7 +1386,7 @@ class NextReleaseTracker(
         collection_text = f" | Collection {collection_id}" if collection_id else ""
         text = (
             f"{title} | 锚点 TMDB {anchor_tmdb_id}{collection_text} | 续作 {candidate_text} | "
-            f"{self._movie_release_status_text(status)} | 已结束本条追踪"
+            f"{self._movie_release_status_text(status, auto_subscribed=auto_subscribed)} | 已结束本条追踪"
         )
         self.post_message(mtype=NotificationType.Plugin, title="追剧助手", text=text)
 
@@ -1469,20 +1406,74 @@ class NextReleaseTracker(
         return "发现可处理的新条目"
 
     @classmethod
-    def _tv_release_status_text(cls, status: str) -> str:
+    def _tv_release_status_text(cls, status: str, auto_subscribed: bool = False) -> str:
         if status == "library":
             return "发现追剧新季已在媒体库"
         if status == "subscription":
             return "发现追剧新季已在订阅中"
+        if auto_subscribed:
+            return "发现追剧新季，已自动添加订阅"
         return "发现追剧新季已上线"
 
     @classmethod
-    def _movie_release_status_text(cls, status: str) -> str:
+    def _movie_release_status_text(cls, status: str, auto_subscribed: bool = False) -> str:
         if status == "library":
             return "发现续作已在媒体库"
         if status == "subscription":
             return "发现续作已在订阅中"
+        if auto_subscribed:
+            return "发现续作，已自动添加订阅"
         return "发现续作已上映"
+
+    def _auto_subscribe(
+        self,
+        *,
+        title: str,
+        year: Optional[str],
+        mtype: MediaType,
+        tmdb_id: int,
+        season: Optional[int] = None,
+    ) -> bool:
+        chain = self._subscribe_chain or SubscribeChain()
+        subscribe_id = None
+        message = ""
+        try:
+            subscribe_id, message = chain.add(
+                title=title,
+                year=year or "",
+                mtype=mtype,
+                tmdbid=tmdb_id,
+                season=season,
+                exist_ok=False,
+                message=False,
+                source="NextReleaseTracker",
+                username="NextReleaseTracker",
+            )
+        except Exception as exc:
+            self._log(
+                "error",
+                "auto_subscribe",
+                f"Automatic subscribe failed: {title} - {exc}",
+                {"tmdb_id": tmdb_id, "season": season, "type": mtype.value},
+            )
+            return False
+
+        if subscribe_id:
+            self._log(
+                "success",
+                "auto_subscribe",
+                f"Automatic subscribe created: {title}",
+                {"tmdb_id": tmdb_id, "season": season, "type": mtype.value, "subscribe_id": subscribe_id},
+            )
+            return True
+
+        self._log(
+            "warning",
+            "auto_subscribe",
+            f"Automatic subscribe not created: {title} - {message or 'unknown result'}",
+            {"tmdb_id": tmdb_id, "season": season, "type": mtype.value},
+        )
+        return False
 
     @staticmethod
     def _parse_track_selection(value: Any) -> List[int]:
@@ -1579,7 +1570,6 @@ class NextReleaseTracker(
         search_model: str,
         page_model: str,
         placeholder: str,
-        saved_summary: dict,
         saved_table: dict,
         candidates: List[Dict[str, Any]],
         show_expr: Optional[str] = None,
@@ -1676,7 +1666,6 @@ class NextReleaseTracker(
             subtitle=subtitle,
             show_expr=show_expr,
             content=[
-                saved_summary,
                 *candidate_content,
                 {
                     "component": "VRow",
@@ -1707,6 +1696,7 @@ class NextReleaseTracker(
                                 self._selection_remove_expr(
                                     model_key,
                                     remove_model,
+                                    manual_season_model="manual_tv_seasons" if model_key == "tracked_tv_ids" else None,
                                     notice_model="tv_pending_notice" if model_key == "tracked_tv_ids" else None,
                                 ),
                                 "mt-md-6",
@@ -1722,6 +1712,7 @@ class NextReleaseTracker(
                                     model_key,
                                     add_model,
                                     remove_model,
+                                    manual_season_model="manual_tv_seasons" if model_key == "tracked_tv_ids" else None,
                                     notice_model="tv_pending_notice" if model_key == "tracked_tv_ids" else None,
                                 ),
                                 "mt-md-6",
@@ -1900,7 +1891,7 @@ class NextReleaseTracker(
         candidates: List[Dict[str, Any]],
         manual_tv_season_model: Optional[str] = None,
     ) -> dict:
-        headers = ["名称", "TMDB编号", "状态"] if is_movie else ["名称", "TMDB编号", "已追季数", "状态"]
+        headers = ["名称", "TMDB编号", "状态", "操作"] if is_movie else ["名称", "TMDB编号", "已追季数", "状态", "操作"]
         candidate_lookup = {
             coerce_int(candidate.get("tmdb_id"), 0) or 0: candidate
             for candidate in candidates
@@ -1941,14 +1932,11 @@ class NextReleaseTracker(
                 latest_season = coerce_int(tv_track.get("latest_season"), 0) or 0
                 pending_count = len(normalize_tmdb_id_list(tv_track.get("pending_seasons")))
                 baseline_season = coerce_int(candidate.get("baseline_season"), 0) or 0
-                manual_season = coerce_int(self._manual_tv_seasons.get(tmdb_id), 0) or 0
-                display_season = latest_season or manual_season or baseline_season
+                display_season = latest_season or baseline_season
                 if latest_season:
                     status = f"已追到 S{latest_season:02d}"
                     if pending_count:
                         status = f"{status} / 待关注 {pending_count} 季"
-                elif display_season > 0:
-                    status = "待保存，保存后生效"
                 else:
                     status = "请设置已追季数"
 
@@ -1970,34 +1958,60 @@ class NextReleaseTracker(
                     manual_tv_season_model or "manual_tv_seasons",
                     tmdb_id,
                 )
+                transient_expr = self._selection_transient_selected_expr(
+                    model_key=model_key,
+                    tmdb_id=tmdb_id,
+                    selected_ids=selected_ids,
+                )
                 empty_expr = self._selection_manual_tv_season_missing_expr(
                     manual_tv_season_model or "manual_tv_seasons",
                     tmdb_id,
+                )
+                stable_missing_expr = (
+                    "{{ (() => { "
+                    f"return ({empty_expr[3:-3]}) && !({transient_expr[3:-3]}); "
+                    "})() }}"
+                )
+                pending_or_transient_expr = (
+                    "{{ (() => { "
+                    f"return ({pending_expr[3:-3]}) || ({transient_expr[3:-3]}); "
+                    "})() }}"
                 )
                 row_content.extend(
                     [
                         {
                             "component": "td",
-                            "props": {"show": pending_expr},
+                            "props": {"show": pending_or_transient_expr},
                             "text": "待保存",
                         },
                         {
                             "component": "td",
-                            "props": {"show": empty_expr},
+                            "props": {"show": stable_missing_expr},
                             "text": f"S{display_season:02d}" if display_season > 0 else "-",
                         },
                         {
                             "component": "td",
-                            "props": {"show": pending_expr},
+                            "props": {"show": pending_or_transient_expr},
                             "text": "待保存，保存后生效",
                         },
                         {
                             "component": "td",
-                            "props": {"show": empty_expr},
+                            "props": {"show": stable_missing_expr},
                             "text": status,
                         },
                     ]
                 )
+            row_content.append(
+                self._table_cell(
+                    self._selection_remove_fixed_button(
+                        model_key=model_key,
+                        tmdb_id=tmdb_id,
+                        page_model=page_model,
+                        manual_season_model=manual_tv_season_model if not is_movie else None,
+                        notice_model="tv_pending_notice" if model_key == "tracked_tv_ids" else None,
+                    )
+                )
+            )
 
             body_rows.append(
                 {
@@ -2125,6 +2139,24 @@ class NextReleaseTracker(
         return "{{ (() => { " f"const ids = {parsed}; " f"return ids.includes({int(tmdb_id)}); " "})() }}"
 
     @classmethod
+    def _selection_transient_selected_expr(
+        cls,
+        *,
+        model_key: str,
+        tmdb_id: int,
+        selected_ids: List[int],
+    ) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        selected_ids_js = cls._js_value([int(item) for item in selected_ids])
+        return (
+            "{{ (() => { "
+            f"const ids = {parsed}; "
+            f"const savedIds = {selected_ids_js}; "
+            f"return ids.includes({int(tmdb_id)}) && !savedIds.includes({int(tmdb_id)}); "
+            "})() }}"
+        )
+
+    @classmethod
     def _selection_paged_contains_expr(
         cls,
         *,
@@ -2184,6 +2216,18 @@ class NextReleaseTracker(
             "{{ (() => { "
             f"const mappings = {manual_seasons}; "
             f"return Number(mappings[{int(tmdb_id)}] || 0) <= 0; "
+            "})() }}"
+        )
+
+    @classmethod
+    def _selection_manual_tv_season_value_expr(cls, manual_tv_season_model: str, tmdb_id: int) -> str:
+        manual_seasons = cls._manual_tv_season_map_expr(manual_tv_season_model)
+        return (
+            "{{ (() => { "
+            f"const mappings = {manual_seasons}; "
+            f"const season = Number(mappings[{int(tmdb_id)}] || 0); "
+            "if (!Number.isInteger(season) || season <= 0) { return '-'; } "
+            "return `S${String(season).padStart(2, '0')}`; "
             "})() }}"
         )
 
@@ -2347,10 +2391,51 @@ class NextReleaseTracker(
         )
 
     @classmethod
+    def _selection_remove_fixed_expr(
+        cls,
+        *,
+        model_key: str,
+        tmdb_id: int,
+        page_model: Optional[str] = None,
+        manual_season_model: Optional[str] = None,
+        notice_model: Optional[str] = None,
+    ) -> str:
+        parsed = cls._selection_model_parse_js(model_key)
+        notice_stmt = (
+            f"model.{notice_model} = `待保存移除：TMDB-{int(tmdb_id)}；当前表单剩余 ${{ids.length}} 项`; "
+            if notice_model
+            else ""
+        )
+        manual_stmt = ""
+        if manual_season_model:
+            manual_seasons = cls._manual_tv_season_map_expr(manual_season_model)
+            manual_stmt = (
+                f"const mappings = {manual_seasons}; "
+                f"delete mappings[{int(tmdb_id)}]; "
+                "const lines = Object.keys(mappings) "
+                ".map((key) => Number(key)) "
+                ".filter((key) => Number.isInteger(key) && key > 0 && Number(mappings[key]) > 0) "
+                ".sort((left, right) => left - right) "
+                ".map((key) => `${key}=${Number(mappings[key])}`); "
+                f"model.{manual_season_model} = lines.join('\\n'); "
+            )
+        page_stmt = f"model.{page_model} = 1; " if page_model else ""
+        return (
+            "(event) => { "
+            f"const ids = {parsed}.filter((item) => item !== {int(tmdb_id)}); "
+            f"model.{model_key} = ids.join('\\n'); "
+            f"{manual_stmt}"
+            f"{page_stmt}"
+            f"{notice_stmt}"
+            "}"
+        )
+
+    @classmethod
     def _selection_remove_expr(
         cls,
         model_key: str,
         remove_model: str,
+        manual_season_model: Optional[str] = None,
         notice_model: Optional[str] = None,
     ) -> str:
         parsed = cls._selection_model_parse_js(model_key)
@@ -2359,15 +2444,52 @@ class NextReleaseTracker(
             if notice_model
             else ""
         )
+        manual_stmt = ""
+        if manual_season_model:
+            manual_seasons = cls._manual_tv_season_map_expr(manual_season_model)
+            manual_stmt = (
+                f"const mappings = {manual_seasons}; "
+                "delete mappings[candidate]; "
+                "const lines = Object.keys(mappings) "
+                ".map((key) => Number(key)) "
+                ".filter((key) => Number.isInteger(key) && key > 0 && Number(mappings[key]) > 0) "
+                ".sort((left, right) => left - right) "
+                ".map((key) => `${key}=${Number(mappings[key])}`); "
+                f"model.{manual_season_model} = lines.join('\\n'); "
+            )
         return (
             "(event) => { "
             f"const candidate = Number(String(model.{remove_model} || '').trim()); "
             "if (!Number.isInteger(candidate) || candidate <= 0) { return; } "
             f"const ids = {parsed}.filter((item) => item !== candidate); "
             f"model.{model_key} = ids.join('\\n'); "
+            f"{manual_stmt}"
             f"{notice_stmt}"
             f"model.{remove_model} = ''; "
             "}"
+        )
+
+    @classmethod
+    def _selection_remove_fixed_button(
+        cls,
+        *,
+        model_key: str,
+        tmdb_id: int,
+        page_model: Optional[str] = None,
+        manual_season_model: Optional[str] = None,
+        notice_model: Optional[str] = None,
+    ) -> dict:
+        return cls._form_action_button(
+            "移出白名单",
+            "warning",
+            "mdi-minus",
+            cls._selection_remove_fixed_expr(
+                model_key=model_key,
+                tmdb_id=tmdb_id,
+                page_model=page_model,
+                manual_season_model=manual_season_model,
+                notice_model=notice_model,
+            ),
         )
 
     @staticmethod
@@ -2375,12 +2497,15 @@ class NextReleaseTracker(
         model_key: str,
         add_model: str,
         remove_model: str,
+        manual_season_model: Optional[str] = None,
         notice_model: Optional[str] = None,
     ) -> str:
         notice_stmt = f"model.{notice_model} = '待保存：已清空名单'; " if notice_model else ""
+        manual_stmt = f"model.{manual_season_model} = ''; " if manual_season_model else ""
         return (
             "(event) => { "
             f"model.{model_key} = ''; "
+            f"{manual_stmt}"
             f"{notice_stmt}"
             f"model.{add_model} = ''; "
             f"model.{remove_model} = ''; "
@@ -2393,20 +2518,27 @@ class NextReleaseTracker(
             track = tv_tracks.get(str(tmdb_id)) or {}
             latest_season = coerce_int(track.get("latest_season"), 0) or 0
             latest_text = f"S{latest_season:02d}" if latest_season else "-"
-            progress = (
-                f"当前到 {latest_text} / 待留意 {self._join_values(track.get('pending_seasons'))}"
-                if track
-                else (
+            pending_seasons = normalize_tmdb_id_list(track.get("pending_seasons")) if track else []
+            if track:
+                status = "追踪中"
+                progress = f"当前到 {latest_text}"
+                if pending_seasons:
+                    status = "已发现待处理新季"
+                    progress = f"{progress} / 待留意 {self._join_values(pending_seasons)}"
+                else:
+                    progress = f"{progress} / 已建立真实追踪"
+            else:
+                status = "未建立追踪"
+                progress = (
                     f"已填 S{coerce_int(self._manual_tv_seasons.get(int(tmdb_id)), 0):02d} / 等待保存生效"
                     if coerce_int(self._manual_tv_seasons.get(int(tmdb_id)), 0)
-                    else "请在配置页填写已追到第几季"
+                    else "已加入名单，尚未建立真实追踪"
                 )
-            )
             rows.append(
                 [
                     track.get("title") or f"TMDB-{tmdb_id}",
                     tmdb_id,
-                    self._selection_status_cell(bool(track)),
+                    status,
                     progress,
                     self._page_track_remove_button(MediaType.TV.value, tmdb_id),
                 ]
@@ -2422,16 +2554,22 @@ class NextReleaseTracker(
                     if coerce_int(candidate.get("anchor_tmdb_id")) == tmdb_id:
                         track = candidate
                         break
-            progress = (
-                f"已找到系列 / 待留意 {len(track.get('pending_tmdb_ids') or [])} 部"
-                if track
-                else "等待第一次记录"
-            )
+            pending_count = len(track.get("pending_tmdb_ids") or []) if track else 0
+            known_count = len(track.get("known_tmdb_ids") or []) if track else 0
+            if track:
+                status = "追踪中"
+                progress = f"已建立系列追踪 / 已知 {known_count} 部"
+                if pending_count:
+                    status = "已发现待处理续作"
+                    progress = f"{progress} / 待留意 {pending_count} 部"
+            else:
+                status = "未建立追踪"
+                progress = "已加入名单，尚未建立真实追踪"
             rows.append(
                 [
                     track.get("title") or f"TMDB-{tmdb_id}",
                     tmdb_id,
-                    self._selection_status_cell(bool(track)),
+                    status,
                     progress,
                     self._page_track_remove_button(
                         MediaType.MOVIE.value,
@@ -2441,14 +2579,6 @@ class NextReleaseTracker(
                 ]
             )
         return rows
-
-    @staticmethod
-    def _selection_status_cell(active: bool) -> dict:
-        return (
-            NextReleaseTracker._chip_cell("追踪中", "success", "mdi-radar")
-            if active
-            else NextReleaseTracker._chip_cell("已加入待命", "info", "mdi-playlist-plus")
-        )
 
     def _page_track_remove_button(
         self,
@@ -2621,6 +2751,7 @@ class NextReleaseTracker(
     def _sorted_form_candidates(self, media_type: str) -> Tuple[List[Dict[str, Any]], int]:
         tv_lookup, movie_lookup = self._local_candidate_lookup()
         lookup = tv_lookup if media_type == MediaType.TV.value else movie_lookup
+        lookup = self._filter_live_form_candidates(lookup, media_type)
         rows = sorted(
             lookup.values(),
             key=lambda item: (
@@ -2632,6 +2763,30 @@ class NextReleaseTracker(
         )
         limited = rows[: self.FORM_CANDIDATE_LIMIT]
         return limited, max(len(rows) - len(limited), 0)
+
+    def _filter_live_form_candidates(
+        self,
+        lookup: Dict[int, Dict[str, Any]],
+        media_type: str,
+    ) -> Dict[int, Dict[str, Any]]:
+        if not lookup:
+            return lookup
+        mtype = MediaType.TV if media_type == MediaType.TV.value else MediaType.MOVIE
+        live_lookup: Dict[int, Dict[str, Any]] = {}
+        for tmdb_id, candidate in lookup.items():
+            media = self._recognize_media(tmdb_id=tmdb_id, mtype=mtype)
+            if not media:
+                live_lookup[tmdb_id] = candidate
+                continue
+            try:
+                exists_info = (self._media_server_chain or MediaServerChain()).media_exists(media)
+            except Exception as exc:
+                logger.warning(f"[NextReleaseTracker] live candidate check failed for {tmdb_id}: {exc}")
+                live_lookup[tmdb_id] = candidate
+                continue
+            if exists_info:
+                live_lookup[tmdb_id] = candidate
+        return live_lookup
 
     def _local_candidate_lookup(self) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]]]:
         tv_lookup: Dict[int, Dict[str, Any]] = {}

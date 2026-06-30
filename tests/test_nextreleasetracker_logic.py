@@ -58,8 +58,11 @@ def load_plugin_module():
             return None
 
     class DummySubscribeChain:
+        calls = []
+
         def add(self, **kwargs):
-            return None, "stub"
+            self.__class__.calls.append(kwargs)
+            return 1, "ok"
 
     class DummyTmdbChain:
         def tmdb_seasons(self, tmdb_id):
@@ -320,6 +323,12 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(3, len(logs))
         self.assertEqual("a2", logs[0]["action"])
         self.assertEqual("a4", logs[-1]["action"])
+
+    def test_clear_action_log_empties_existing_entries(self):
+        self._store.append_action(level="info", action="a1", message="1")
+        self._store.append_action(level="info", action="a2", message="2")
+        self._store.clear_action_log()
+        self.assertEqual([], self._store.get_action_log())
 
 
 class PluginPageTests(unittest.TestCase):
@@ -605,6 +614,7 @@ class PluginPageTests(unittest.TestCase):
 
     def test_selected_tv_track_notifies_and_clears_after_detection(self):
         plugin_module = load_plugin_module()
+        plugin_module.SubscribeChain.calls = []
         plugin = plugin_module.NextReleaseTracker()
         plugin.init_plugin(
             {
@@ -642,8 +652,11 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual([], plugin._selected_tv_ids)
         self.assertEqual([], store.get_selected_tv_ids())
         self.assertEqual("", plugin._config["tracked_tv_ids"])
+        self.assertEqual(1, len(plugin_module.SubscribeChain.calls))
+        self.assertEqual(60625, plugin_module.SubscribeChain.calls[0]["tmdbid"])
+        self.assertEqual(2, plugin_module.SubscribeChain.calls[0]["season"])
         self.assertIn("\u65b0\u5b63 S02", plugin._last_message["text"])
-        self.assertIn("\u53d1\u73b0\u8ffd\u5267\u65b0\u5b63\u5df2\u4e0a\u7ebf", plugin._last_message["text"])
+        self.assertIn("\u5df2\u81ea\u52a8\u6dfb\u52a0\u8ba2\u9605", plugin._last_message["text"])
         self.assertIn("\u5df2\u7ed3\u675f\u672c\u6761\u8ffd\u8e2a", plugin._last_message["text"])
 
     def test_selected_tv_track_in_library_completes_without_notification(self):
@@ -770,6 +783,7 @@ class PluginPageTests(unittest.TestCase):
         self.assertNotIn("tv_search_text", model)
         self.assertNotIn("movie_search_text", model)
         self.assertEqual(5, model["max_tmdb_calls_per_minute"])
+        self.assertIn("操作", form_text)
         self.assertFalse(
             any(
                 node.get("component") == "VTextarea"
@@ -938,6 +952,28 @@ class PluginPageTests(unittest.TestCase):
         self.assertNotIn("\u52a0\u5165\u540e\uff0c\u63d2\u4ef6\u4f1a\u7ee7\u7eed\u5173\u6ce8\u8fd9\u90e8\u5267\u540e\u9762\u7684\u65b0\u4e00\u5b63", form_text)
         self.assertIn("tv_candidate_search_text", form_text)
         self.assertNotIn('\"model\": \"candidate_search_text\"', form_text)
+        self.assertIn("待保存移除：TMDB-60625", form_text)
+
+    def test_form_selected_tv_table_inline_remove_keeps_save_semantics(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "60625",
+                "manual_tv_seasons": "60625=9",
+            }
+        )
+
+        form, _ = plugin.get_form()
+        form_text = repr(form)
+
+        self.assertIn("tv_selected_page", form_text)
+        self.assertIn("model.tracked_tv_ids = ids.join('\\\\n')", form_text)
+        self.assertIn("model.manual_tv_seasons = lines.join('\\\\n')", form_text)
+        self.assertIn("待保存移除：TMDB-60625", form_text)
 
     def test_form_exposes_manual_tv_season_controls(self):
         plugin_module = load_plugin_module()
@@ -998,10 +1034,10 @@ class PluginPageTests(unittest.TestCase):
         form_text = repr(form)
 
         self.assertIn("S02", form_text)
-        self.assertIn("当前已加入 1 个剧集：TMDB-247718（当前到 S02）", form_text)
         self.assertIn("已追到 S02", form_text)
         self.assertIn("剧集编号（已加入）", form_text)
         self.assertNotIn("剧集已追季数（每行一条）", form_text)
+        self.assertNotIn("当前已加入 1 个剧集：TMDB-247718（当前到 S02）", form_text)
     def test_form_tv_table_pending_status_is_bound_to_manual_tv_seasons_model(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
@@ -1023,6 +1059,70 @@ class PluginPageTests(unittest.TestCase):
                 for node in nodes
             )
         )
+
+    def test_form_new_unsaved_tv_entry_shows_pending_instead_of_missing_season_prompt(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "",
+            }
+        )
+
+        form = plugin._selection_current_table_live(
+            media_label="剧集",
+            model_key="tracked_tv_ids",
+            page_model="tv_selected_page",
+            selected_ids=[],
+            track_lookup={},
+            is_movie=False,
+            candidates=[{"tmdb_id": 247718, "title": "TMDB-247718", "baseline_season": 0}],
+            manual_tv_season_model="manual_tv_seasons",
+        )
+        nodes = list(iter_component_nodes(form))
+
+        self.assertTrue(
+            any(
+                node.get("component") == "td"
+                and node.get("text") == "待保存，保存后生效"
+                and "savedIds = []" in str((node.get("props") or {}).get("show", ""))
+                for node in nodes
+            )
+        )
+        self.assertTrue(
+            any(
+                node.get("component") == "td"
+                and node.get("text") == "请设置已追季数"
+                and "!((() => { const ids =" in str((node.get("props") or {}).get("show", ""))
+                and "savedIds = []" in str((node.get("props") or {}).get("show", ""))
+                for node in nodes
+            )
+        )
+
+    def test_form_tv_table_pending_season_cell_ignores_stale_instance_manual_season(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "247718",
+            }
+        )
+        plugin._manual_tv_seasons = {247718: 2}
+
+        form, _ = plugin.get_form()
+        nodes = list(iter_component_nodes(form))
+        pending_cells = [
+            node
+            for node in nodes
+            if node.get("component") == "td"
+            and node.get("text") in {"待保存", "待保存，保存后生效", "S02"}
+        ]
+        self.assertFalse(any(node.get("text") == "S02" for node in pending_cells))
+        self.assertTrue(any(node.get("text") == "待保存" for node in pending_cells))
 
     def test_form_tv_add_actions_prepend_and_emit_pending_notice(self):
         plugin_module = load_plugin_module()
@@ -1062,6 +1162,44 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual([], movie_candidates)
         self.assertEqual(0, hidden_tv_candidates)
         self.assertEqual(0, hidden_movie_candidates)
+
+    def test_form_candidates_filter_deleted_library_items(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        histories = [
+            types.SimpleNamespace(
+                status=True,
+                tmdbid=60625,
+                type=plugin_module.MediaType.TV.value,
+                seasons="S09",
+                title="Rick and Morty",
+                year="2013",
+                date="2026-06-03 09:00:00",
+            ),
+            types.SimpleNamespace(
+                status=True,
+                tmdbid=1396,
+                type=plugin_module.MediaType.TV.value,
+                seasons="S05",
+                title="Breaking Bad",
+                year="2008",
+                date="2026-06-05 08:00:00",
+            ),
+        ]
+        plugin_module.TransferHistoryOper = lambda: types.SimpleNamespace(list_by_date=lambda _cutoff: histories)
+        plugin_module.SubscribeOper = lambda: types.SimpleNamespace(list=lambda state=None: [])
+        plugin.chain = types.SimpleNamespace(
+            recognize_media=lambda **kwargs: types.SimpleNamespace(tmdb_id=kwargs["tmdbid"])
+        )
+        plugin._media_server_chain = types.SimpleNamespace(
+            media_exists=lambda media: media if getattr(media, "tmdb_id", None) == 1396 else None
+        )
+
+        tv_candidates, hidden_tv_candidates = plugin._sorted_form_candidates(plugin_module.MediaType.TV.value)
+
+        self.assertEqual([1396], [item["tmdb_id"] for item in tv_candidates])
+        self.assertEqual(0, hidden_tv_candidates)
+        self.assertNotIn(60625, [item["tmdb_id"] for item in tv_candidates])
 
     def test_selected_entries_bootstrap_tracks_from_local_catalog(self):
         plugin_module = load_plugin_module()
@@ -1222,6 +1360,36 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual(2, tv_track["latest_season"])
         self.assertEqual("247718=2", plugin._current_config_snapshot()["manual_tv_seasons"])
 
+    def test_removed_tv_id_is_pruned_from_manual_tv_seasons_on_save(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "60625",
+                "manual_tv_seasons": "60625=3\n247718=2",
+            }
+        )
+
+        self.assertEqual("60625=3", plugin._current_config_snapshot()["manual_tv_seasons"])
+
+    def test_cleared_tv_ids_prune_manual_tv_seasons_on_save(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "enable_tv": True,
+                "tracked_tv_ids": "",
+                "manual_tv_seasons": "247718=2",
+            }
+        )
+
+        self.assertEqual("", plugin._current_config_snapshot()["manual_tv_seasons"])
+
     def test_manual_movie_selection_bootstraps_track_without_local_history(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
@@ -1364,6 +1532,220 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual(5, second["remaining_tracks"])
         self.assertEqual([100, 101], calls)
 
+    def test_cron_tick_without_due_tasks_updates_runtime_and_records_idle_log(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": False,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "100",
+                "cron": "0 3 * * 1",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.acknowledge_tv_completion(
+            tmdb_id=100,
+            title="Show 100",
+            year="2020",
+            season=1,
+            source="manual",
+        )
+        runtime = store.get_runtime_state()
+        runtime["scan_plan"] = {
+            "cron": "0 3 * * 1",
+            "scope": "tv",
+            "period_minutes": 10080,
+            "cycle_started_at": "2026-06-01 03:00:00",
+            "task_ids": ["tv:100"],
+            "pending_task_ids": [],
+        }
+        store.update_runtime(runtime)
+        plugin._now = lambda: "2026-06-01 03:01:00"
+
+        summary = plugin._run_rescan(scope="tv", reason="cron_tick", notify=False)
+        runtime_after = store.get_runtime_state()
+        logs = store.get_action_log()
+
+        self.assertTrue(summary["success"])
+        self.assertEqual(0, summary["planned_tracks"])
+        self.assertEqual("2026-06-01 03:01:00", runtime_after["last_scan_finished_at"])
+        self.assertEqual(0, runtime_after["last_scan_summary"]["planned_tracks"])
+        self.assertEqual("cron_idle", logs[-1]["action"])
+        self.assertEqual(1, runtime_after["current_cycle_stats"]["tick_count"])
+        self.assertEqual(1, runtime_after["current_cycle_stats"]["idle_tick_count"])
+
+    def test_new_cycle_clears_previous_action_log(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": False,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "100",
+                "cron": "0 3 * * 1",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.append_action(level="info", action="old_action", message="old")
+        runtime = store.get_runtime_state()
+        runtime["scan_plan"] = {
+            "cron": "0 3 * * 1",
+            "scope": "tv",
+            "period_minutes": 10080,
+            "cycle_started_at": "2026-05-01 03:00:00",
+            "task_ids": ["tv:100"],
+            "pending_task_ids": ["tv:100"],
+        }
+        store.update_runtime(runtime)
+
+        plugin._resolve_scan_task_plan(scope="tv", reason="cron_tick")
+
+        self.assertEqual([], store.get_action_log())
+        self.assertEqual(0, store.get_runtime_state()["current_cycle_stats"]["tick_count"])
+
+    def test_scheduled_plan_prunes_legacy_logs_before_cycle_start(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": False,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "100",
+                "cron": "0 3 * * 1",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.append_action(level="info", action="legacy", message="old")
+        runtime = store.get_runtime_state()
+        runtime["scan_plan"] = {
+            "cron": "0 3 * * 1",
+            "scope": "tv",
+            "period_minutes": 10080,
+            "cycle_started_at": "2099-01-01 00:00:00",
+            "task_ids": ["tv:100"],
+            "pending_task_ids": ["tv:100"],
+        }
+        store.update_runtime(runtime)
+
+        plugin._resolve_scan_task_plan(scope="tv", reason="cron_tick")
+
+        self.assertEqual([], store.get_action_log())
+
+    def test_locked_scan_increments_cycle_locked_skip_count(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": False,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "100",
+                "cron": "0 3 * * 1",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.update_runtime(
+            {
+                "current_cycle_stats": {
+                    "cycle_started_at": "2026-06-01 03:00:00",
+                    "tick_count": 0,
+                    "idle_tick_count": 0,
+                    "active_tick_count": 0,
+                    "processed_task_count": 0,
+                    "locked_skip_count": 0,
+                    "last_active_tick_at": None,
+                    "last_locked_skip_at": None,
+                }
+            }
+        )
+        plugin._scan_lock.acquire()
+        try:
+            summary = plugin._run_rescan(scope="tv", reason="cron_tick", notify=False)
+        finally:
+            plugin._scan_lock.release()
+
+        runtime = store.get_runtime_state()
+        self.assertFalse(summary["success"])
+        self.assertEqual(1, runtime["current_cycle_stats"]["locked_skip_count"])
+
+    def test_auto_subscribe_decision_log_is_recorded_for_tv(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": True,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "60625",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.acknowledge_tv_completion(
+            tmdb_id=60625,
+            title="Rick and Morty",
+            year="2013",
+            season=1,
+            source="manual",
+        )
+        plugin._tmdb_chain = types.SimpleNamespace(
+            tmdb_seasons=lambda tmdb_id: [
+                {"season_number": 2, "episode_count": 10, "air_date": "2026-06-01"},
+                {"season_number": 3, "episode_count": 10, "air_date": "2026-06-01"},
+            ]
+        )
+        plugin._media_server_chain = types.SimpleNamespace(media_exists=lambda media: None)
+        plugin._subscribe_exists = lambda **kwargs: False
+
+        plugin._run_rescan(scope="tv", reason="test", notify=True)
+
+        logs = store.get_action_log()
+        decision = [entry for entry in logs if entry["action"] == "auto_subscribe_decision"][-1]
+        self.assertEqual("earliest_available_season", decision["context"]["reason"])
+        self.assertEqual(2, decision["context"]["selected"])
+
+    def test_page_shows_current_cycle_stats(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": True,
+                "enable_tv": True,
+                "enable_movie": False,
+                "cron": "0 3 * * 1",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.update_runtime(
+            {
+                "current_cycle_stats": {
+                    "cycle_started_at": "2026-06-01 03:00:00",
+                    "tick_count": 7,
+                    "idle_tick_count": 5,
+                    "active_tick_count": 2,
+                    "processed_task_count": 2,
+                    "locked_skip_count": 1,
+                    "last_active_tick_at": "2026-06-01 05:00:00",
+                    "last_locked_skip_at": "2026-06-01 05:01:00",
+                }
+            }
+        )
+
+        page = plugin.get_page()
+        page_text = repr(page)
+        self.assertIn("本周期 tick 次数", page_text)
+        self.assertIn("本周期空跑次数", page_text)
+        self.assertIn("本周期锁冲突跳过", page_text)
+
     def test_manual_rescan_stops_after_five_tmdb_calls_per_minute(self):
         plugin_module = load_plugin_module()
         plugin = plugin_module.NextReleaseTracker()
@@ -1497,6 +1879,7 @@ class PluginPageTests(unittest.TestCase):
 
     def test_movie_rescan_with_notify_uses_movie_friendly_copy(self):
         plugin_module = load_plugin_module()
+        plugin_module.SubscribeChain.calls = []
         plugin = plugin_module.NextReleaseTracker()
         plugin.init_plugin(
             {
@@ -1543,9 +1926,104 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual(1, summary["movie_candidates"])
         self.assertEqual(1, summary["notifications_sent"])
         self.assertEqual(1, summary["tracks_completed"])
+        self.assertEqual(1, len(plugin_module.SubscribeChain.calls))
+        self.assertEqual(604, plugin_module.SubscribeChain.calls[0]["tmdbid"])
         self.assertIn("\u7eed\u4f5c The Matrix Reloaded(2003)", plugin._last_message["text"])
-        self.assertIn("\u53d1\u73b0\u7eed\u4f5c\u5df2\u4e0a\u6620", plugin._last_message["text"])
+        self.assertIn("\u5df2\u81ea\u52a8\u6dfb\u52a0\u8ba2\u9605", plugin._last_message["text"])
         self.assertIn("\u5df2\u7ed3\u675f\u672c\u6761\u8ffd\u8e2a", plugin._last_message["text"])
+
+    def test_tv_rescan_with_notify_keeps_track_when_auto_subscribe_fails(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": True,
+                "enable_tv": True,
+                "enable_movie": False,
+                "tracked_tv_ids": "60625",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.acknowledge_tv_completion(
+            tmdb_id=60625,
+            title="Rick and Morty",
+            year="2013",
+            season=1,
+            source="manual",
+        )
+        plugin._tmdb_chain = types.SimpleNamespace(
+            tmdb_seasons=lambda tmdb_id: [
+                {"season_number": 2, "episode_count": 10, "air_date": "2026-06-01"},
+            ]
+        )
+        plugin._media_server_chain = types.SimpleNamespace(media_exists=lambda media: None)
+        plugin._subscribe_exists = lambda **kwargs: False
+        plugin._subscribe_chain = types.SimpleNamespace(add=lambda **kwargs: (None, "failed"))
+
+        summary = plugin._run_rescan(scope="tv", reason="test", notify=True)
+
+        self.assertTrue(summary["success"])
+        self.assertEqual(0, summary["notifications_sent"])
+        self.assertEqual(0, summary["tracks_completed"])
+        self.assertEqual(1, summary["tracks_updated"])
+        self.assertEqual([2], store.get_tv_tracks()["60625"]["pending_seasons"])
+        self.assertEqual([60625], plugin._selected_tv_ids)
+        self.assertFalse(hasattr(plugin, "_last_message"))
+
+    def test_movie_rescan_with_notify_keeps_track_when_auto_subscribe_fails(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": True,
+                "enable_tv": False,
+                "enable_movie": True,
+                "tracked_movie_ids": "603",
+            }
+        )
+        store = plugin._ensure_state_store()
+        track = store.upsert_movie_track(
+            anchor_tmdb_id=603,
+            title="The Matrix",
+            year="1999",
+            source="manual",
+            collection_id=2344,
+            known_tmdb_ids=[603],
+        )
+        store.acknowledge_movie_completion(
+            track_key=track["track_key"],
+            tmdb_id=603,
+            title="The Matrix",
+            year="1999",
+            source="manual",
+            collection_id=2344,
+        )
+        plugin._tmdb_chain = types.SimpleNamespace(
+            tmdb_collection=lambda collection_id: [
+                {
+                    "tmdb_id": 604,
+                    "title": "The Matrix Reloaded",
+                    "year": "2003",
+                    "release_date": "2026-06-01",
+                    "collection_id": 2344,
+                }
+            ]
+        )
+        plugin._media_server_chain = types.SimpleNamespace(media_exists=lambda media: None)
+        plugin._subscribe_exists = lambda **kwargs: False
+        plugin._subscribe_chain = types.SimpleNamespace(add=lambda **kwargs: (None, "failed"))
+
+        summary = plugin._run_rescan(scope="movie", reason="test", notify=True)
+
+        self.assertTrue(summary["success"])
+        self.assertEqual(0, summary["notifications_sent"])
+        self.assertEqual(0, summary["tracks_completed"])
+        self.assertEqual(1, summary["tracks_updated"])
+        self.assertEqual([604], store.get_movie_tracks()["collection:2344"]["pending_tmdb_ids"])
+        self.assertEqual([603], plugin._selected_movie_ids)
+        self.assertFalse(hasattr(plugin, "_last_message"))
 
     def test_movie_rescan_with_existing_subscription_completes_without_notification(self):
         plugin_module = load_plugin_module()
@@ -1708,10 +2186,48 @@ class PluginPageTests(unittest.TestCase):
         self.assertNotIn("\u4ec5\u626b\u7535\u5f71", page_text)
         self.assertIn("\u8fd0\u884c\u6001\u8bca\u65ad", page_text)
         self.assertIn("\u5df2\u52a0\u5165\u7684\u5267\u96c6", page_text)
-        self.assertIn("\u5f53\u524d\u8ffd\u8e2a\u4e2d\u7684\u5267\u96c6", page_text)
+        self.assertNotIn("\u5f53\u524d\u8ffd\u8e2a\u4e2d\u7684\u5267\u96c6", page_text)
         self.assertIn("\u6700\u8fd1\u52a8\u4f5c\u65e5\u5fd7", page_text)
         self.assertIn("plugin/NextReleaseTracker/rescan?apikey=test-token", page_text)
         self.assertIn("plugin/NextReleaseTracker/diagnostic/event?apikey=test-token", page_text)
+
+    def test_page_merges_track_status_into_selected_tables(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": True,
+                "enable_tv": True,
+                "enable_movie": True,
+                "tracked_tv_ids": "60625",
+                "tracked_movie_ids": "603",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.upsert_tv_track(
+            tmdb_id=60625,
+            title="Rick and Morty",
+            year="2013",
+            latest_season=9,
+            source="manual",
+        )
+        store.mark_tv_pending(60625, 10)
+        movie_track = store.upsert_movie_track(
+            anchor_tmdb_id=603,
+            title="The Matrix",
+            year="1999",
+            source="manual",
+            collection_id=2344,
+            known_tmdb_ids=[603],
+        )
+        store.mark_movie_pending(movie_track["track_key"], 604)
+
+        page_text = repr(plugin.get_page())
+
+        self.assertNotIn("\u5f53\u524d\u8ffd\u8e2a\u4e2d\u7684\u7535\u5f71", page_text)
+        self.assertIn("\u5df2\u53d1\u73b0\u5f85\u5904\u7406\u65b0\u5b63", page_text)
+        self.assertIn("\u5df2\u53d1\u73b0\u5f85\u5904\u7406\u7eed\u4f5c", page_text)
 
     def test_runtime_diagnostic_event_verifies_and_cleans_up(self):
         plugin_module = load_plugin_module()
@@ -1894,6 +2410,81 @@ class PluginPageTests(unittest.TestCase):
         self.assertEqual(1, summary["scanned_tv"])
         self.assertEqual(1, summary["tracks_updated"])
         self.assertEqual([2], store.get_tv_tracks()["60625"]["pending_seasons"])
+
+    def test_api_catalog_exposes_automation_health_endpoint(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin({"enabled": True, "enable_tv": True})
+
+        api_paths = [item["path"] for item in plugin.get_api()]
+        self.assertIn("/automation/health", api_paths)
+
+    def test_api_automation_health_returns_scheduler_and_runtime_summary(self):
+        plugin_module = load_plugin_module()
+        plugin = plugin_module.NextReleaseTracker()
+        plugin.init_plugin(
+            {
+                "enabled": True,
+                "notify": True,
+                "enable_tv": True,
+                "enable_movie": False,
+                "cron": "0 3 * * 1",
+            }
+        )
+        store = plugin._ensure_state_store()
+        store.update_runtime(
+            {
+                "last_scan_started_at": "2026-06-01 03:00:00",
+                "last_scan_finished_at": "2026-06-01 03:01:00",
+                "last_scan_scope": "tv",
+                "last_scan_reason": "cron_tick",
+                "last_scan_summary": {
+                    "success": True,
+                    "errors": 0,
+                    "planned_tracks": 1,
+                    "remaining_tracks": 6,
+                    "budget_exhausted": False,
+                },
+                "current_cycle_stats": {
+                    "cycle_started_at": "2026-06-01 03:00:00",
+                    "tick_count": 7,
+                    "idle_tick_count": 5,
+                    "active_tick_count": 2,
+                    "processed_task_count": 2,
+                    "locked_skip_count": 1,
+                    "last_active_tick_at": "2026-06-01 05:00:00",
+                    "last_locked_skip_at": "2026-06-01 05:01:00",
+                },
+                "scan_plan": {
+                    "scope": "tv",
+                    "cycle_started_at": "2026-06-01 03:00:00",
+                    "period_minutes": 10080,
+                    "task_ids": ["tv:100", "tv:101"],
+                    "pending_task_ids": ["tv:101"],
+                },
+                "tmdb_rate_limit": {
+                    "limit": 5,
+                    "used": 2,
+                    "window_started_at": "2026-06-01 05:00:00",
+                },
+            }
+        )
+
+        response = plugin.api_automation_health()
+
+        self.assertTrue(response["success"])
+        data = response["data"]
+        self.assertEqual("* * * * *", data["scheduler"]["minute_tick_cron"])
+        self.assertEqual("0 3 * * 1", data["scheduler"]["configured_cycle_cron"])
+        self.assertTrue(data["scheduler"]["plugin_enabled"])
+        self.assertEqual("2026-06-01 03:00:00", data["runtime"]["last_scan_started_at"])
+        self.assertEqual("2026-06-01 03:01:00", data["runtime"]["last_scan_finished_at"])
+        self.assertEqual(7, data["cycle"]["tick_count"])
+        self.assertEqual(5, data["cycle"]["idle_tick_count"])
+        self.assertEqual(1, data["plan"]["pending_task_count"])
+        self.assertEqual("tv:101", data["plan"]["next_due_task_id"])
+        self.assertEqual(5, data["tmdb_rate_limit"]["limit"])
+        self.assertEqual(2, data["tmdb_rate_limit"]["used"])
 
 
 if __name__ == "__main__":
